@@ -2,3 +2,9 @@
 /agent-go
 *.test
 /dist/
+
+# pi's own state for this directory (not part of the repo)
+/.pi/
+
+# original handoff deliverable; repo copy lives at docs/HANDOFF.md
+/HANDOFF-go-agent-runtime.md

@@ -230,6 +230,28 @@ func parseEntries(raw []byte) []Entry {
 	return entries
 }
 
+// LastName returns the last non-empty session_info name among entries (the
+// session title), mirroring Babylon's getSessionName() semantics.
+func LastName(entries []Entry) string {
+	var name string
+	for _, e := range entries {
+		if e.Type == TypeSessionInfo && strings.TrimSpace(e.Name) != "" {
+			name = strings.TrimSpace(e.Name)
+		}
+	}
+	return name
+}
+
+// Name returns the current title of a session file ("" if none has been
+// written yet).
+func Name(path string) (string, error) {
+	entries, err := ReadAll(path)
+	if err != nil {
+		return "", err
+	}
+	return LastName(entries), nil
+}
+
 func firstSession(objs []any) *Entry {
 	for _, obj := range objs {
 		e, ok := obj.(Entry)

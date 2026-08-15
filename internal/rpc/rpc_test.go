@@ -312,6 +312,82 @@ func TestRPCListSessions(t *testing.T) {
 	}
 }
 
+func TestRPCRecap(t *testing.T) {
+	_, store, inW, outR, _ := newTestServer(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		if agent.IsNamingRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "Session title"},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
+		if agent.IsRecapRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "Recap: did the work."},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
+		return []provider.Event{
+			{Kind: provider.EventText, Text: "done"},
+			{Kind: provider.EventDone, StopReason: "stop"},
+		}, nil
+	})
+
+	waitStarted(t, outR)
+	// Run a turn first so the session has a title.
+	writeReq(t, inW, 1, "send", map[string]any{"text": "do the work"})
+	readUntil(t, outR, func(o map[string]any) bool {
+		return o["type"] == "event" && o["event"] == agent.EventSettled
+	})
+
+	writeReq(t, inW, 2, "recap", nil)
+	lines := readUntil(t, outR, func(o map[string]any) bool { return o["id"] != nil && toF(o["id"]) == 2 })
+	resp := lines[len(lines)-1]
+	if resp["error"] != nil {
+		t.Fatalf("recap error: %v", resp["error"])
+	}
+	result := resp["result"].(map[string]any)
+	text, _ := result["text"].(string)
+	if !strings.HasPrefix(text, "Recap: ") {
+		t.Fatalf("recap text = %q", text)
+	}
+
+	// Persisted as a session_info entry with the title carried forward.
+	entries, _ := session.ReadAll(store.Path())
+	if got := session.LastName(entries); got != "Session title" {
+		t.Errorf("title after recap = %q", got)
+	}
+	var recapFound bool
+	for _, e := range entries {
+		if e.Type == session.TypeSessionInfo && e.Recap == text {
+			recapFound = true
+		}
+	}
+	if !recapFound {
+		t.Error("recap not persisted")
+	}
+}
+
+func TestRPCStateCapabilities(t *testing.T) {
+	_, _, inW, outR, _ := newTestServer(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		return []provider.Event{{Kind: provider.EventDone, StopReason: "stop"}}, nil
+	})
+	waitStarted(t, outR)
+	writeReq(t, inW, 9, "state", nil)
+	lines := readUntil(t, outR, func(o map[string]any) bool { return o["id"] != nil })
+	result := lines[len(lines)-1]["result"].(map[string]any)
+	caps, ok := result["capabilities"].([]any)
+	if !ok {
+		t.Fatalf("capabilities missing: %v", result)
+	}
+	got := map[string]bool{}
+	for _, c := range caps {
+		got[c.(string)] = true
+	}
+	if !got["recap"] || !got["auto-naming"] {
+		t.Errorf("capabilities = %v", caps)
+	}
+}
+
 func toF(v any) float64 {
 	switch n := v.(type) {
 	case float64:

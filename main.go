@@ -100,19 +100,46 @@ func (c providerConfig) provider() (provider.Provider, error) {
 }
 
 // fakeHandler is the offline demo model: it echoes the last user text and
-// never calls tools.
+// never calls tools. It also answers the naming and recap meta-calls
+// deterministically so --fake sessions get a title and a recap.
 func fakeHandler(ctx context.Context, req provider.Request) ([]provider.Event, error) {
-	var last string
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			last = req.Messages[i].Text
-			break
-		}
+	if agent.IsNamingRequest(req) {
+		return []provider.Event{
+			{Kind: provider.EventText, Text: fakeTitle(lastUserText(req))},
+			{Kind: provider.EventDone, StopReason: "stop"},
+		}, nil
+	}
+	if agent.IsRecapRequest(req) {
+		return []provider.Event{
+			{Kind: provider.EventText, Text: "Recap: the fake model summarized recent changes."},
+			{Kind: provider.EventDone, StopReason: "stop"},
+		}, nil
 	}
 	return []provider.Event{
-		{Kind: provider.EventText, Text: "[fake model] " + last},
+		{Kind: provider.EventText, Text: "[fake model] " + lastUserText(req)},
 		{Kind: provider.EventDone, StopReason: "stop"},
 	}, nil
+}
+
+func lastUserText(req provider.Request) string {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			return req.Messages[i].Text
+		}
+	}
+	return ""
+}
+
+// fakeTitle derives a deterministic short title from the first user message.
+func fakeTitle(text string) string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return "Untitled session"
+	}
+	if len(words) > 4 {
+		words = words[:4]
+	}
+	return strings.Join(words, " ")
 }
 
 func commonProviderFlags(fs *flag.FlagSet, c *providerConfig) {

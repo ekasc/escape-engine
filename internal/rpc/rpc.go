@@ -185,6 +185,14 @@ func (s *Server) dispatch(ctx context.Context, req request) {
 	case "state":
 		s.writeResult(req.ID, s.agent.State())
 
+	case "recap":
+		text, err := s.agent.Recap(ctx)
+		if err != nil {
+			s.writeError(req.ID, codeInternal, err.Error())
+			return
+		}
+		s.writeResult(req.ID, map[string]any{"text": text})
+
 	case "list-sessions":
 		var p struct {
 			Cwd string `json:"cwd"`

@@ -29,6 +29,7 @@ type Entry struct {
 	Cwd           string   `json:"cwd,omitempty"`
 	ParentSession string   `json:"parentSession,omitempty"`
 	Name          string   `json:"name,omitempty"`
+	Recap         string   `json:"recap,omitempty"`
 	Provider      string   `json:"provider,omitempty"`
 	ModelID       string   `json:"modelId,omitempty"`
 	Model         string   `json:"model,omitempty"`

@@ -73,6 +73,12 @@ func startSettleWatcher(ag *Agent) (<-chan string, func()) {
 
 func TestTurnSimple(t *testing.T) {
 	ag, store, _ := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		if IsNamingRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "Hi there title"},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
 		return []provider.Event{
 			{Kind: provider.EventText, Text: "Hello!"},
 			{Kind: provider.EventDone, StopReason: "stop"},
@@ -105,10 +111,152 @@ func TestTurnSimple(t *testing.T) {
 	if err != nil || info == nil {
 		t.Fatalf("info: %v", err)
 	}
-	if !strings.Contains(info.Name, "hi there") {
+	if info.Name != "Hi there title" {
 		t.Errorf("title = %q", info.Name)
 	}
 	_ = turnID
+}
+
+func TestAutoNamingOnce(t *testing.T) {
+	ag, store, fake := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		if IsNamingRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "Fix the bug"},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
+		return []provider.Event{
+			{Kind: provider.EventText, Text: "ok"},
+			{Kind: provider.EventDone, StopReason: "stop"},
+		}, nil
+	})
+
+	if _, err := ag.Send("please fix the bug"); err != nil {
+		t.Fatal(err)
+	}
+	waitSettle(t, ag, ReasonDone)
+	if _, err := ag.Send("and add a test"); err != nil {
+		t.Fatal(err)
+	}
+	waitSettle(t, ag, ReasonDone)
+
+	// Naming fires once, then two turns: 3 provider calls total.
+	if fake.Calls != 3 {
+		t.Fatalf("calls = %d, want 3 (naming + 2 turns)", fake.Calls)
+	}
+
+	entries, err := session.ReadAll(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var titles []string
+	for _, e := range entries {
+		if e.Type == session.TypeSessionInfo && e.Name != "" {
+			titles = append(titles, e.Name)
+		}
+	}
+	if len(titles) != 1 || titles[0] != "Fix the bug" {
+		t.Fatalf("titles = %v, want exactly [Fix the bug]", titles)
+	}
+}
+
+func TestRecapPersistsAndKeepsTitle(t *testing.T) {
+	ag, store, _ := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		if IsNamingRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "Fix the bug"},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
+		if IsRecapRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "Recap: fixed the parser and added a test."},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
+		return []provider.Event{
+			{Kind: provider.EventText, Text: "ok"},
+			{Kind: provider.EventDone, StopReason: "stop"},
+		}, nil
+	})
+
+	if _, err := ag.Send("please fix the bug"); err != nil {
+		t.Fatal(err)
+	}
+	waitSettle(t, ag, ReasonDone)
+
+	line, err := ag.Recap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "Recap: ") {
+		t.Fatalf("recap line = %q", line)
+	}
+
+	entries, _ := session.ReadAll(store.Path())
+	// Title lookup (last non-empty session_info name) must still resolve.
+	if got := session.LastName(entries); got != "Fix the bug" {
+		t.Errorf("title after recap = %q, want %q", got, "Fix the bug")
+	}
+	// The recap is persisted in a session_info entry that carries the title.
+	var recapEntry *session.Entry
+	for i := range entries {
+		if entries[i].Type == session.TypeSessionInfo && entries[i].Recap != "" {
+			recapEntry = &entries[i]
+		}
+	}
+	if recapEntry == nil || recapEntry.Recap != line {
+		t.Fatalf("recap entry = %+v", recapEntry)
+	}
+	if recapEntry.Name != "Fix the bug" {
+		t.Errorf("recap entry name = %q, want %q", recapEntry.Name, "Fix the bug")
+	}
+}
+
+func TestRecapWithoutTitle(t *testing.T) {
+	ag, store, _ := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		// Naming fails (best-effort): no title is written.
+		if IsNamingRequest(req) {
+			return nil, errors.New("naming unavailable")
+		}
+		if IsRecapRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "Recap: no title yet."},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
+		return []provider.Event{
+			{Kind: provider.EventText, Text: "ok"},
+			{Kind: provider.EventDone, StopReason: "stop"},
+		}, nil
+	})
+
+	if _, err := ag.Send("do work"); err != nil {
+		t.Fatal(err)
+	}
+	waitSettle(t, ag, ReasonDone)
+
+	line, err := ag.Recap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "Recap: ") {
+		t.Fatalf("recap line = %q", line)
+	}
+	entries, _ := session.ReadAll(store.Path())
+	if got := session.LastName(entries); got != "" {
+		t.Errorf("title = %q, want empty", got)
+	}
+	// The recap is still persisted (sidecar field on a session_info entry).
+	var found bool
+	for _, e := range entries {
+		if e.Type == session.TypeSessionInfo && e.Recap == line {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("recap not persisted when no title exists")
+	}
 }
 
 func TestTurnToolUse(t *testing.T) {
@@ -137,8 +285,8 @@ func TestTurnToolUse(t *testing.T) {
 	}
 	waitSettle(t, ag, ReasonDone)
 
-	if fake.Calls != 2 {
-		t.Fatalf("provider calls = %d, want 2", fake.Calls)
+	if fake.Calls != 3 {
+		t.Fatalf("provider calls = %d, want 3 (naming + 2 turns)", fake.Calls)
 	}
 
 	entries, _ := session.ReadAll(store.Path())
@@ -234,7 +382,13 @@ func TestStopAfterPartialText(t *testing.T) {
 func TestProviderErrorRetry(t *testing.T) {
 	ag, _, fake := newTestAgent(t, nil)
 	fake.Handler = func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
-		if fake.Calls <= 1 {
+		if IsNamingRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "retry title"},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
+		if fake.Calls <= 2 {
 			return nil, &provider.RetryableError{Status: 503, Msg: "boom"}
 		}
 		return []provider.Event{
@@ -247,8 +401,8 @@ func TestProviderErrorRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
-	if fake.Calls != 2 {
-		t.Fatalf("calls = %d, want 2 (one retry)", fake.Calls)
+	if fake.Calls != 3 { // naming + one failed attempt + one retry
+		t.Fatalf("calls = %d, want 3", fake.Calls)
 	}
 }
 
@@ -358,7 +512,7 @@ func TestSteer(t *testing.T) {
 	}
 	waitSettle(t, ag, ReasonDone)
 	_ = turnID
-	if fake.Calls != 2 {
+	if fake.Calls != 2 { // naming (aborted) + the redirected turn
 		t.Fatalf("calls = %d, want 2", fake.Calls)
 	}
 }
@@ -436,11 +590,15 @@ func TestTurnKeepsHistory(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 2 {
+	if len(seen) != 3 { // naming + two turns
 		t.Fatalf("seen = %d", len(seen))
 	}
-	// The second call must include the first user+assistant pair.
+	// The first turn call must include the first user+assistant pair; the
+	// second turn call must retain it too.
 	if !strings.Contains(seen[1], "user:first turn") {
-		t.Errorf("history lost across turns: %s", seen[1])
+		t.Errorf("first turn history lost: %s", seen[1])
+	}
+	if !strings.Contains(seen[2], "user:first turn") {
+		t.Errorf("second turn history lost: %s", seen[2])
 	}
 }

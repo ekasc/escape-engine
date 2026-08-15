@@ -17,6 +17,25 @@ import (
 // ErrBusy is returned when Send is called while a turn is running.
 var ErrBusy = errors.New("agent busy: a turn is already running")
 
+// NamingSystemPrompt is the system prompt for the auto-naming meta-call. Fake
+// providers key off this exact string, so keep it stable.
+const NamingSystemPrompt = "You are naming a coding-agent conversation. Reply with ONLY a short title (3-6 words, no quotes, no period)."
+
+// RecapSystemPrompt is the system prompt for the recap meta-call.
+const RecapSystemPrompt = "You are summarizing a coding-agent conversation. Reply with ONLY a single line that begins with \"Recap: \" and then 1-3 short sentences describing the recent changes and the current state (not the full history)."
+
+// IsNamingRequest reports whether req is the auto-naming meta-call.
+func IsNamingRequest(req provider.Request) bool {
+	return len(req.Messages) > 0 && req.Messages[0].Role == "system" &&
+		strings.HasPrefix(req.Messages[0].Text, NamingSystemPrompt)
+}
+
+// IsRecapRequest reports whether req is the recap meta-call.
+func IsRecapRequest(req provider.Request) bool {
+	return len(req.Messages) > 0 && req.Messages[0].Role == "system" &&
+		strings.HasPrefix(req.Messages[0].Text, RecapSystemPrompt)
+}
+
 // Options configures an Agent.
 type Options struct {
 	Store         *session.Store
@@ -53,11 +72,12 @@ const (
 
 // TurnInfo is the payload for the `state` RPC method.
 type TurnInfo struct {
-	State        State  `json:"state"`
-	TurnID       string `json:"turnId,omitempty"`
-	Model        string `json:"model"`
-	StartedAt    int64  `json:"startedAt,omitempty"`
-	SettleReason string `json:"settleReason,omitempty"`
+	State        State    `json:"state"`
+	TurnID       string   `json:"turnId,omitempty"`
+	Model        string   `json:"model"`
+	StartedAt    int64    `json:"startedAt,omitempty"`
+	SettleReason string   `json:"settleReason,omitempty"`
+	Capabilities []string `json:"capabilities"`
 }
 
 // Agent runs turns against one session file.
@@ -98,7 +118,7 @@ func (a *Agent) Unsubscribe(ch chan Event) { a.bus.Unsubscribe(ch) }
 func (a *Agent) State() TurnInfo {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	info := TurnInfo{State: a.state, TurnID: a.turnID, Model: a.opts.Model, SettleReason: a.settleReason}
+	info := TurnInfo{State: a.state, TurnID: a.turnID, Model: a.opts.Model, SettleReason: a.settleReason, Capabilities: []string{"recap", "auto-naming"}}
 	if !a.turnStart.IsZero() {
 		info.StartedAt = a.turnStart.UnixMilli()
 	}
@@ -210,11 +230,12 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 	}
 	a.publish(Event{Event: EventMessageEnd, TurnID: turnID, Role: session.RoleUser, MessageID: userEntry.ID, Timestamp: userMsg.Timestamp})
 
-	// 2. Auto-title once per session (name -> session_info entry).
+	// 2. Auto-name once per session: if no title exists yet, ask the provider
+	// for one and persist it as a session_info entry (best-effort).
 	if !a.titleSet {
 		a.titleSet = true
-		if name := titleFrom(text); name != "" {
-			_, _ = a.opts.Store.Append(session.Entry{Type: session.TypeSessionInfo, Name: name, ParentID: userEntry.ID})
+		if existing, err := session.Name(a.opts.Store.Path()); err == nil && existing == "" {
+			a.nameSession(ctx, text, userEntry.ID)
 		}
 	}
 
@@ -446,17 +467,156 @@ func (a *Agent) currentTurnID() string {
 	return a.turnID
 }
 
-func titleFrom(text string) string {
-	t := strings.TrimSpace(text)
-	if t == "" {
-		return ""
+// callText makes a bounded meta-call (no tools, no retries, no events) and
+// returns the concatenated text. Used for naming and recap.
+func (a *Agent) callText(ctx context.Context, messages []provider.Message, maxTokens int) (string, error) {
+	req := provider.Request{Model: a.opts.Model, Messages: messages, MaxTokens: maxTokens}
+	stream, err := a.opts.Provider.Stream(ctx, req)
+	if err != nil {
+		return "", err
 	}
+	defer stream.Close()
+	var b strings.Builder
+	for {
+		ev, err := stream.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return b.String(), err
+		}
+		if ev.Kind == provider.EventText {
+			b.WriteString(ev.Text)
+		}
+	}
+	return b.String(), nil
+}
+
+// nameSession asks the provider for a short title for the first user message
+// and appends it as a session_info entry. Best-effort: any failure returns
+// silently and leaves the session untitled.
+func (a *Agent) nameSession(ctx context.Context, text, parentID string) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := a.callText(ctx, []provider.Message{
+		{Role: "system", Text: NamingSystemPrompt},
+		{Role: "user", Text: text},
+	}, 200)
+	if err != nil {
+		return
+	}
+	name := cleanTitle(out)
+	if name == "" {
+		return
+	}
+	_, _ = a.opts.Store.Append(session.Entry{Type: session.TypeSessionInfo, Name: name, ParentID: parentID})
+}
+
+// Recap summarizes the recent conversation into a single "Recap: ..." line,
+// persists it as a session_info entry (carrying the existing title forward),
+// and returns the line. Safe to call while a turn is running.
+func (a *Agent) Recap(ctx context.Context) (string, error) {
+	entries, err := session.ReadAll(a.opts.Store.Path())
+	if err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := a.callText(ctx, []provider.Message{
+		{Role: "system", Text: RecapSystemPrompt},
+		{Role: "user", Text: recentMessages(entries, 20)},
+	}, 300)
+	if err != nil {
+		return "", err
+	}
+	line := cleanRecap(out)
+	if line == "" {
+		return "", errors.New("provider returned an empty recap")
+	}
+
+	title := session.LastName(entries)
+	entry := session.Entry{Type: session.TypeSessionInfo, Recap: line}
+	if title != "" {
+		entry.Name = title
+	}
+	if _, err := a.opts.Store.Append(entry); err != nil {
+		return "", err
+	}
+	return line, nil
+}
+
+// recentMessages renders the message stretch to summarize: the last max
+// message entries, or everything after the last recap marker (a session_info
+// entry carrying a recap field) if one exists.
+func recentMessages(entries []session.Entry, max int) string {
+	lastRecap := -1
+	for i, e := range entries {
+		if e.Type == session.TypeSessionInfo && strings.TrimSpace(e.Recap) != "" {
+			lastRecap = i
+		}
+	}
+
+	var msgs []session.Entry
+	for i := lastRecap + 1; i < len(entries); i++ {
+		if entries[i].Type == session.TypeMessage && entries[i].Message != nil {
+			msgs = append(msgs, entries[i])
+		}
+	}
+	if len(msgs) > max {
+		msgs = msgs[len(msgs)-max:]
+	}
+
+	var b strings.Builder
+	for _, m := range msgs {
+		text := strings.TrimSpace(m.Message.Text(false))
+		if text == "" {
+			continue
+		}
+		role := m.Message.Role
+		if role == session.RoleToolResult {
+			role = "tool"
+		}
+		b.WriteString(role + ": " + truncateText(text, 400) + "\n")
+	}
+	return b.String()
+}
+
+// cleanTitle normalizes a provider-returned title: strips quotes, a trailing
+// period, and collapses whitespace.
+func cleanTitle(s string) string {
+	t := strings.TrimSpace(s)
+	t = strings.Trim(t, "\"'`\u201c\u201d\u2018\u2019")
+	t = strings.TrimSuffix(strings.TrimSpace(t), ".")
 	t = strings.Join(strings.Fields(t), " ")
 	r := []rune(t)
 	if len(r) > 60 {
 		t = string(r[:59]) + "…"
 	}
 	return t
+}
+
+// cleanRecap collapses a provider recap to a single "Recap: ..." line.
+func cleanRecap(s string) string {
+	t := strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if t == "" {
+		return ""
+	}
+	if strings.HasPrefix(t, "Recap: ") {
+		return t
+	}
+	if strings.HasPrefix(t, "Recap:") {
+		return "Recap: " + strings.TrimSpace(strings.TrimPrefix(t, "Recap:"))
+	}
+	return "Recap: " + t
+}
+
+func truncateText(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 func toSessionUsage(u provider.Usage) *session.Usage {

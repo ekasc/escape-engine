@@ -1,0 +1,4 @@
+/pi-go
+/agent-go
+*.test
+/dist/

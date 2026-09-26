@@ -127,7 +127,10 @@ type Agent struct {
 
 	titleSet bool
 
-	systemPrompt  string
+	systemPrompt string
+	// history caches the parsed session entries so each turn reads only the
+	// bytes appended since the last one.
+	history       entryCache
 	steerQueue    []string
 	followUpQueue []string
 	questions     map[string]chan string
@@ -478,7 +481,13 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 			}
 		}
 
-		hist, err := historyFromStore(a.opts.Store.Path(), a.systemPrompt)
+		entries, err := a.history.sinceAppends(a.opts.Store.Path())
+		if err != nil {
+			a.publish(Event{Event: EventError, Message: "failed to read session: " + err.Error()})
+			a.settle(ReasonError)
+			return
+		}
+		hist, err := messagesFromEntries(entries, a.systemPrompt)
 		if err != nil {
 			a.publish(Event{Event: EventError, Message: fmt.Sprintf("failed to build history: %v", err)})
 			a.settle(ReasonError)
@@ -946,7 +955,7 @@ func (a *Agent) nameSession(ctx context.Context, text, parentID string) {
 // persists it as a session_info entry (carrying the existing title forward),
 // and returns the line. Safe to call while a turn is running.
 func (a *Agent) Recap(ctx context.Context) (string, error) {
-	entries, err := session.ReadAll(a.opts.Store.Path())
+	entries, err := a.history.sinceAppends(a.opts.Store.Path())
 	if err != nil {
 		return "", err
 	}

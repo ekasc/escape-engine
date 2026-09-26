@@ -50,6 +50,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdServe(args[1:], stdin, stdout, stderr)
 	case "rpc":
 		return cmdRPC(args[1:], stdin, stdout, stderr)
+	case "index-sessions":
+		return cmdIndexSessions(args, stdout, stderr)
+	case "prune-sessions":
+		return cmdPruneSessions(args, stdout, stderr)
 	case "list-sessions":
 		return cmdListSessions(args[1:], stdout, stderr)
 	case "login":
@@ -1040,6 +1044,72 @@ func cmdRPC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "escape rpc:", err)
 		return 1
 	}
+	return 0
+}
+
+// --- index-sessions ---
+
+// cmdIndexSessions rebuilds the session index from the sessions on disk.
+//
+// The index is derived and self-correcting, so this is never required for
+// correctness. It exists to compact an index that has grown after sessions were
+// removed, because entries for files that no longer exist are only dropped by
+// a rebuild.
+func cmdIndexSessions(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("index-sessions", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	root := configuredSessionRoot("")
+	n, err := session.RefreshIndex(root)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape:", err)
+		return 1
+	}
+	size := 0
+	if info, statErr := os.Stat(session.IndexPath(root)); statErr == nil {
+		size = int(info.Size())
+	}
+	fmt.Fprintf(stdout, "indexed %d sessions, %s is %d KB\n", n, session.IndexPath(root), size/1024)
+	return 0
+}
+
+// --- prune-sessions ---
+
+// cmdPruneSessions removes project directories that hold no sessions.
+//
+// The store keeps a directory per project ever opened, and every listing walks
+// all of them, so empty ones are pure latency. A directory is only removed when
+// it holds no session file and no other file, and the removal re-checks, so a
+// session written between the scan and the removal is never lost. Without
+// --apply it only reports.
+func cmdPruneSessions(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("prune-sessions", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	apply := fs.Bool("apply", false, "remove the empty directories")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	root := configuredSessionRoot("")
+	found, err := session.PruneEmptyProjectDirs(root)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape:", err)
+		return 1
+	}
+	if !*apply {
+		fmt.Fprintln(stdout, session.DescribePrune(found))
+		if len(found.Empty) > 0 {
+			fmt.Fprintln(stdout, "re-run with --apply to remove them")
+		}
+		return 0
+	}
+	removed, err := session.PruneEmptyProjectDirsApply(root)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "removed %d of %d empty project directories\n", removed, len(found.Empty))
 	return 0
 }
 

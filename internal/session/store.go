@@ -56,6 +56,7 @@ func Open(path, cwd string) (*Store, error) {
 		}
 		s.id = id
 		s.lastID = id
+		InvalidateScan()
 		return s, nil
 	}
 
@@ -106,6 +107,9 @@ func (s *Store) Append(e Entry) (Entry, error) {
 	if _, err := s.f.Write(line); err != nil {
 		return e, err
 	}
+	// A new session changes what a header scan would report, so the shared
+	// listing cannot be reused for the next caller.
+	InvalidateScan()
 	s.lastID = e.ID
 	return e, nil
 }

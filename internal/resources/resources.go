@@ -24,7 +24,13 @@ type Skill struct {
 	Path                   string // absolute path to SKILL.md (or the .md file)
 	AllowedTools           []string
 	DisableModelInvocation bool
-	Body                   string // markdown body after the frontmatter, trimmed
+	// Disabled is set by the loader when the user switched this skill off. It is
+	// kept separate from DisableModelInvocation, which the skill file declares
+	// for itself, so a user setting never overwrites an author's intent.
+	Disabled bool
+	// Location is "user", "project" or "path", for display.
+	Location string
+	Body     string // markdown body after the frontmatter, trimmed
 
 	location string // "user", "project" or "path"
 }
@@ -106,6 +112,12 @@ func (l *Loader) GetCommands() []Command {
 		})
 	}
 	for _, s := range l.Skills() {
+		// A skill the user switched off produces no command. Advertising it
+		// here would put its description back into the command list, and the
+		// command list is context.
+		if s.Disabled {
+			continue
+		}
 		cmds = append(cmds, Command{
 			Name:        "skill:" + s.Name,
 			Description: s.Description,

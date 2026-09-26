@@ -5,19 +5,44 @@ import (
 	"github.com/ekasc/escape/engine/internal/session"
 )
 
-// historyFromStore rebuilds the provider message list from the session file,
-// so every model call sees the full conversation. Thinking blocks are not
-// sent back (most OpenAI-compatible APIs reject them as input).
-//
-// Compaction is respected: entries before the latest compaction entry's kept
-// boundary are summarized away and their summary is folded into the system
-// prompt, so the model call only carries the summary + the recent messages.
-func historyFromStore(path, systemPrompt string) ([]provider.Message, error) {
-	entries, err := session.ReadAll(path)
-	if err != nil {
-		return nil, err
-	}
+// entryCache remembers how much of a session file has already been turned into
+// entries. A session file is append-only, so re-reading it in full on every turn
+// is wasted work that grows without bound: a long session reaches tens of
+// megabytes and hundreds of milliseconds per turn before the provider is called
+// at all.
+type entryCache struct {
+	entries []session.Entry
+	offset  int64
+	path    string
+}
 
+// appendReadWindow bounds one read. A turn that appends more than this is
+// covered by the loop rather than by a single unbounded read.
+const appendReadWindow = 4 * 1024 * 1024
+
+// sinceAppends returns every entry in the file, reading only the bytes appended
+// since the previous call. A different path, or a file that shrank, means the
+// cache describes a file that no longer exists, so it restarts from zero.
+func (c *entryCache) sinceAppends(path string) ([]session.Entry, error) {
+	if c.path != path {
+		c.entries = nil
+		c.offset = 0
+		c.path = path
+	}
+	for {
+		fresh, offset, err := session.Since(path, c.offset, appendReadWindow)
+		if err != nil {
+			return nil, err
+		}
+		if offset == c.offset {
+			return c.entries, nil
+		}
+		c.entries = append(c.entries, fresh...)
+		c.offset = offset
+	}
+}
+
+func messagesFromEntries(entries []session.Entry, systemPrompt string) ([]provider.Message, error) {
 	firstKeptIdx := 0
 	var summary string
 	var snapImages []*provider.Image

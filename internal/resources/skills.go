@@ -168,15 +168,43 @@ func (l *Loader) loadSkillFile(path, location string) (Skill, bool) {
 	if len(description) > maxSkillDescriptionLength {
 		l.warnf("skill %s: description exceeds %d characters (%d)", path, maxSkillDescriptionLength, len(description))
 	}
+	full := absPath(path)
 	return Skill{
 		Name:                   name,
 		Description:            description,
-		Path:                   absPath(path),
+		Path:                   full,
 		AllowedTools:           parseAllowedTools(fm["allowed-tools"]),
 		DisableModelInvocation: fm["disable-model-invocation"] == true,
+		Disabled:               l.skillDisabled(full),
+		Location:               location,
 		Body:                   body,
 		location:               location,
 	}, true
+}
+
+// skillDisabled reports whether this skill is off for the project being loaded.
+//
+// The global list applies everywhere, and a project decision beats it. Absence
+// from the override list is not a decision, it is an inheritance, which is what
+// makes the state three valued rather than two: inherit, force on, force off.
+// Paths are compared cleaned so a settings file written with a trailing
+// separator still matches.
+func (l *Loader) skillDisabled(path string) bool {
+	if l.s == nil {
+		return false
+	}
+	clean := filepath.Clean(path)
+	for _, o := range l.s.SkillOverrides {
+		if filepath.Clean(strings.TrimSpace(o.Path)) == clean {
+			return !o.Enabled
+		}
+	}
+	for _, p := range l.s.DisabledSkills {
+		if filepath.Clean(strings.TrimSpace(p)) == clean {
+			return true
+		}
+	}
+	return false
 }
 
 // parseAllowedTools normalizes the allowed-tools frontmatter value (a
@@ -206,7 +234,10 @@ func parseAllowedTools(v any) []string {
 func (l *Loader) SkillsXML() string {
 	var visible []Skill
 	for _, s := range l.Skills() {
-		if !s.DisableModelInvocation {
+		// A skill the user switched off is not offered to the model at all.
+		// Advertising it and then refusing to load it would make the toggle a
+		// lie, and would keep paying for the tokens.
+		if !s.DisableModelInvocation && !s.Disabled {
 			visible = append(visible, s)
 		}
 	}
@@ -220,7 +251,7 @@ func (l *Loader) SkillsXML() string {
 	b.WriteString("\n<available_skills>\n")
 	for _, s := range visible {
 		fmt.Fprintf(&b, "  <skill>\n    <name>%s</name>\n    <description>%s</description>\n    <location>%s</location>\n  </skill>\n",
-			escapeXML(s.Name), escapeXML(s.Description), escapeXML(s.Path))
+			escapeXML(s.Name), escapeXML(summarise(s.Description, promptDescriptionCap)), escapeXML(s.Path))
 	}
 	b.WriteString("</available_skills>")
 	return b.String()
@@ -231,14 +262,47 @@ func escapeXML(s string) string {
 	return r.Replace(s)
 }
 
+// promptDescriptionCap bounds the description carried in the system prompt.
+//
+// A skill file is the source of truth and the model is told to read it when the
+// description looks relevant, so the description only has to make that decision.
+// An uncapped list of long prose descriptions was the single largest line item
+// in every request: 232 skills, 72KB of description, and a median of 255
+// characters each. Capping at 200 keeps the overwhelming majority of them whole
+// and costs about 7,600 tokens per request.
+const promptDescriptionCap = 200
+
+// summarise trims to a word boundary so a shortened description still reads as a
+// sentence rather than stopping mid-word.
+func summarise(text string, limit int) string {
+	flat := strings.Join(strings.Fields(text), " ")
+	if len(flat) <= limit {
+		return flat
+	}
+	cut := flat[:limit]
+	if i := strings.LastIndexByte(cut, ' '); i > limit/2 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " ,.;:") + "..."
+}
+
 // SkillCommand expands a /skill:<name> command into the full skill content
 // wrapped in a <skill> block, with the arguments appended as "User: <args>".
 // The SKILL.md is re-read at expansion time so edits are picked up. Returns
-// ("", false) when the skill is unknown or unreadable.
+// ("", false) when the skill is unknown, unreadable, or switched off.
+//
+// A disabled skill is refused here as well as being kept out of SkillsXML and
+// the command list, because this is the path that puts a skill's entire body
+// into the conversation. Filtering the listing alone would still let a disabled
+// skill be injected by name.
 func (l *Loader) SkillCommand(name, args string) (string, bool) {
 	for _, s := range l.Skills() {
 		if s.Name != name {
 			continue
+		}
+		if s.Disabled {
+			l.warnf("skill %s is switched off and was not loaded", s.Name)
+			return "", false
 		}
 		content, err := os.ReadFile(s.Path)
 		if err != nil {

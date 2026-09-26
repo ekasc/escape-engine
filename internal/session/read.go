@@ -156,6 +156,7 @@ func List(root string) ([]Info, error) {
 		}
 		return nil, err
 	}
+	defer FlushIndex(root)
 	var infos []Info
 	for _, d := range dirs {
 		if !d.IsDir() {
@@ -170,7 +171,7 @@ func List(root string) ([]Info, error) {
 				continue
 			}
 			path := filepath.Join(root, d.Name(), f.Name())
-			info, err := ReadInfo(path)
+			info, err := indexInfo(root, path)
 			if err != nil || info == nil {
 				continue
 			}
@@ -269,4 +270,46 @@ func truncate(s string, n int) string {
 		return oneLine
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// Since reads entries appended after from, returning them and the offset to
+// resume from. Range walks backwards from an end offset; this walks forwards from
+// a start offset, which is the shape an append-only transcript needs.
+//
+// A session file is opened O_APPEND and nothing truncates it, so the bytes before
+// from cannot change and a caller can keep from across turns instead of re-reading
+// the whole file. A partial trailing line is left unconsumed rather than parsed,
+// so a reader that races a writer resumes cleanly at the next newline.
+//
+// If the file is shorter than from, it was replaced or truncated, so the read
+// restarts from zero and returns the offset it actually reached. Callers that
+// treat the returned entries as append-only must handle that case.
+func Since(path string, from int64, maxBytes int64) ([]Entry, int64, error) {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	size := stat.Size()
+	if from < 0 || from > size {
+		from = 0
+	}
+	limit := size
+	if maxBytes > 0 && from+maxBytes < limit {
+		limit = from + maxBytes
+	}
+	raw, err := readRange(path, from, limit-from)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Only whole lines are consumed, and the offset stops at the last one. This
+	// has to hold at end of file too, not just at a window boundary: a reader
+	// that lands mid-entry would otherwise advance past bytes it could not parse
+	// and lose that entry for good. The engine writes whole lines under the
+	// store lock, so in practice the file always ends on a newline, and this
+	// costs one scan of the tail.
+	consumed := 0
+	if i := bytes.LastIndexByte(raw, '\n'); i >= 0 {
+		consumed = i + 1
+	}
+	return parseEntries(raw[:consumed]), from + int64(consumed), nil
 }

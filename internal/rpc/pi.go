@@ -91,6 +91,14 @@ type piRequest struct {
 
 	Op    string `json:"op"`
 	Index int    `json:"index"`
+	// Scope selects which list a skill decision belongs to: "global" applies to
+	// every project, "project" applies to the project named below and beats the
+	// global choice.
+	Scope string `json:"scope"`
+	// Project is the cwd a project-scoped decision applies to. It is named
+	// rather than inferred, because the engine can hold more than one project
+	// at a time and "the current one" is not a fact it can rely on.
+	Project string `json:"project"`
 }
 
 type piResponse struct {
@@ -168,6 +176,229 @@ func (s *PiServer) applyPendingResume() {
 	}
 	info, _ := session.ReadInfo(path)
 	s.emit(map[string]any{"type": "session_switched", "path": path, "session": info})
+}
+
+// skillViews is the wire shape for the skills list. Disabled skills are
+// included with enabled=false rather than omitted, because the settings surface
+// has to be able to show what the user switched off.
+// knownProjects lists the projects a skill decision may be scoped to, newest
+// activity first. Anything outside this set is refused rather than written to.
+const maxKnownProjects = 50
+
+type projectView struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+func (s *PiServer) knownProjects() ([]projectView, error) {
+	paths, err := session.Projects(s.root, maxKnownProjects)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]projectView, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, projectView{Path: p, Name: filepath.Base(p)})
+	}
+	return out, nil
+}
+
+// skillViews reports, per skill, the global decision and any per-project
+// decision that exists.
+//
+// Decisions belong to projects, not to whichever one this process sits in, so
+// each project's own settings file is read for the project-scoped truth. What is
+// not reported is an effective value per project, because that is derived: the
+// surface combines a project's override with the global list, and doing the
+// merge in two places is how they drift apart.
+func (s *PiServer) skillViews(skills []resources.Skill, projects []projectView) []map[string]any {
+	overridesByProject := make(map[string]map[string]bool, len(projects))
+	for _, project := range projects {
+		set, err := settings.Load(project.Path)
+		if err != nil {
+			continue
+		}
+		overrides := make(map[string]bool, len(set.SkillOverrides))
+		for _, o := range set.SkillOverrides {
+			overrides[filepath.Clean(strings.TrimSpace(o.Path))] = o.Enabled
+		}
+		overridesByProject[filepath.Clean(project.Path)] = overrides
+	}
+
+	globallyDisabled := make(map[string]bool, len(s.set.DisabledSkills))
+	for _, p := range s.set.DisabledSkills {
+		globallyDisabled[filepath.Clean(strings.TrimSpace(p))] = true
+	}
+
+	out := make([]map[string]any, 0, len(skills))
+	for _, skill := range skills {
+		path := filepath.Clean(skill.Path)
+		overrides := make([]map[string]any, 0, 2)
+		for _, project := range projects {
+			if enabled, ok := overridesByProject[filepath.Clean(project.Path)][path]; ok {
+				overrides = append(overrides, map[string]any{"project": project.Path, "enabled": enabled})
+			}
+		}
+		// The project that owns a skill, when it is not a user level one. A
+		// project skill cannot be decided anywhere else, so the surface needs to
+		// know that rather than offer a choice that would do nothing.
+		owner := ""
+		if skill.Location == "project" {
+			for _, project := range projects {
+				if strings.HasPrefix(skill.Path, filepath.Clean(project.Path)+string(filepath.Separator)) {
+					owner = project.Path
+					break
+				}
+			}
+		}
+		out = append(out, map[string]any{
+			"name":          skill.Name,
+			"description":   skill.Description,
+			"path":          skill.Path,
+			"location":      skill.Location,
+			"enabled":       !skill.Disabled,
+			"globalEnabled": !globallyDisabled[path],
+			"project":       owner,
+			"overrides":     overrides,
+		})
+	}
+	return out
+}
+
+// handleSetSkillEnabled records a skill decision in one of the two lists.
+//
+// The global list applies to every project. A project decision beats it, and
+// clearing a project decision returns that skill to inheriting the global one,
+// which is why enabled is a pointer: absent means inherit, not off.
+//
+// The system prompt is fixed when an agent is built, so a change only reaches
+// the model on a rebuild. Doing that mid-turn would stop the turn the user is
+// watching, so a busy engine records the change, answers pending, and the
+// surface says so.
+func (s *PiServer) handleSetSkillEnabled(req piRequest, cmd string) {
+	path := filepath.Clean(strings.TrimSpace(req.Path))
+	if path == "" {
+		s.finish(req, cmd, nil, fmt.Errorf("skill path is required"))
+		return
+	}
+	known := false
+	for _, skill := range s.loader.Skills() {
+		if filepath.Clean(skill.Path) == path {
+			known = true
+			break
+		}
+	}
+	if !known {
+		s.finish(req, cmd, nil, fmt.Errorf("no skill at %s", path))
+		return
+	}
+	scope := strings.TrimSpace(req.Scope)
+	if scope == "" {
+		scope = "global"
+	}
+	if scope != "global" && scope != "project" {
+		s.finish(req, cmd, nil, fmt.Errorf("scope must be global or project"))
+		return
+	}
+	// A project scope names its project. The engine can be looking at more than
+	// one at a time, and accepting an arbitrary path here would turn this into a
+	// write to any directory the process can reach.
+	project := ""
+	if scope == "project" {
+		known, err := s.knownProjects()
+		if err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		want := filepath.Clean(strings.TrimSpace(req.Project))
+		for _, p := range known {
+			if filepath.Clean(p.Path) == want {
+				project = p.Path
+				break
+			}
+		}
+		if project == "" {
+			s.finish(req, cmd, nil, fmt.Errorf("%s is not a known project", want))
+			return
+		}
+	}
+
+	s.mu.Lock()
+	if scope == "global" {
+		disabled := make([]string, 0, len(s.set.DisabledSkills)+1)
+		for _, p := range s.set.DisabledSkills {
+			if filepath.Clean(strings.TrimSpace(p)) != path {
+				disabled = append(disabled, p)
+			}
+		}
+		// A nil enabled clears the global decision, so the skill goes back to on
+		// everywhere unless a project says otherwise.
+		if req.Enabled != nil && !*req.Enabled {
+			disabled = append(disabled, path)
+		}
+		sort.Strings(disabled)
+		s.set.DisabledSkills = disabled
+	} else {
+		// The merged settings only carry this process's own project overrides, so
+		// another project's list has to be read from that project's file.
+		existing, err := settings.Load(project)
+		if err != nil {
+			s.mu.Unlock()
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		overrides := make([]settings.SkillOverride, 0, len(existing.SkillOverrides)+1)
+		for _, o := range existing.SkillOverrides {
+			if filepath.Clean(strings.TrimSpace(o.Path)) != path {
+				overrides = append(overrides, o)
+			}
+		}
+		if req.Enabled != nil {
+			overrides = append(overrides, settings.SkillOverride{Path: path, Enabled: *req.Enabled})
+		}
+		sort.Slice(overrides, func(i, j int) bool { return overrides[i].Path < overrides[j].Path })
+		s.set.SkillOverrides = overrides
+	}
+	live := s.agent
+	s.mu.Unlock()
+
+	var writeErr error
+	if scope == "global" {
+		s.mu.Lock()
+		disabled := append([]string{}, s.set.DisabledSkills...)
+		s.mu.Unlock()
+		writeErr = settings.SetDisabledSkills(disabled)
+	} else {
+		s.mu.Lock()
+		overrides := append([]settings.SkillOverride{}, s.set.SkillOverrides...)
+		s.mu.Unlock()
+		writeErr = settings.SetSkillOverrides(project, overrides)
+	}
+	if writeErr != nil {
+		s.finish(req, cmd, nil, writeErr)
+		return
+	}
+
+	pending := false
+	if live != nil && live.State().State == agent.StateRunning {
+		pending = true
+	} else if err := s.buildAgent(s.store.Path()); err != nil {
+		s.finish(req, cmd, nil, err)
+		return
+	}
+	// The loader caches its skills and has no invalidation, so a decision has to
+	// replace it. Without this the command list and the settings list keep
+	// serving the previous state, which puts a disabled skill's description
+	// back into get_commands.
+	s.mu.Lock()
+	s.loader = resources.New(s.cwd, s.set)
+	s.mu.Unlock()
+
+	s.finish(req, cmd, map[string]any{
+		"path":    path,
+		"scope":   scope,
+		"enabled": req.Enabled,
+		"pending": pending,
+	}, nil)
 }
 
 // handleMemory exposes the project's durable store to the shell so the user can
@@ -478,6 +709,18 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 			s.mu.Unlock()
 		}
 		s.finish(req, cmd, map[string]any{}, nil)
+	case "list_skills":
+		projects, err := s.knownProjects()
+		if err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		s.finish(req, cmd, map[string]any{
+			"skills":   s.skillViews(s.loader.Skills(), projects),
+			"projects": projects,
+		}, nil)
+	case "set_skill_enabled":
+		s.handleSetSkillEnabled(req, cmd)
 	case "memory":
 		s.handleMemory(req, cmd)
 	case "answer_question":

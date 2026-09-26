@@ -88,7 +88,7 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (*CompactionRe
 }
 
 func (a *Agent) Snapcompact(_ context.Context) (*CompactionResult, error) {
-	entries, err := session.ReadAll(a.opts.Store.Path())
+	entries, err := a.history.sinceAppends(a.opts.Store.Path())
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +139,7 @@ func (a *Agent) autoCompactIfNeeded(ctx context.Context) error {
 	if !a.opts.Settings.Compaction.Enabled {
 		return nil
 	}
-	entries, err := session.ReadAll(a.opts.Store.Path())
+	entries, err := a.history.sinceAppends(a.opts.Store.Path())
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func (a *Agent) autoCompactIfNeeded(ctx context.Context) error {
 }
 
 func (a *Agent) compact(ctx context.Context, reason, instructions, turnID string) (*CompactionResult, error) {
-	entries, err := session.ReadAll(a.opts.Store.Path())
+	entries, err := a.history.sinceAppends(a.opts.Store.Path())
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +215,7 @@ func (a *Agent) compact(ctx context.Context, reason, instructions, turnID string
 // the branch being abandoned (from the common ancestor with targetID up to
 // fromID).
 func (a *Agent) SummarizeBranch(ctx context.Context, fromID, targetID string) error {
-	entries, err := session.ReadAll(a.opts.Store.Path())
+	entries, err := a.history.sinceAppends(a.opts.Store.Path())
 	if err != nil {
 		return err
 	}

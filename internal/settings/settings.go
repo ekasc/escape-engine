@@ -1,7 +1,7 @@
-// Package settings loads pi-compatible agent settings from
-// ~/.pi/agent/settings.json (global) and <cwd>/.pi/settings.json (project),
+// Package settings loads agent settings from
+// ~/.escape/settings.json (global) and <cwd>/.escape/settings.json (project),
 // nested-merging them with project settings winning over global settings,
-// and applying pi's documented defaults for anything unset.
+// and applying defaults for anything unset.
 package settings
 
 import (
@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
-// Settings is the merged agent configuration. It mirrors the subset of pi's
-// settings surface that the escape runtime uses. Nested groups (Compaction,
+// Settings is the merged agent configuration. It mirrors the subset of the
+// settings surface that the Escape runtime uses. Nested groups (Compaction,
 // BranchSummary, Retry) merge field-by-field, so a project file that only
 // sets compaction.reserveTokens keeps the global compaction.enabled value.
 type Settings struct {
@@ -62,7 +64,7 @@ type Settings struct {
 	DefaultProjectTrust string          `json:"defaultProjectTrust"` // "ask"|"always"|"never"
 }
 
-// Defaults returns a Settings with pi's documented defaults applied.
+// Defaults returns a Settings with the documented defaults applied.
 func Defaults() *Settings {
 	s := &Settings{}
 	s.Compaction.Enabled = true
@@ -81,19 +83,42 @@ func Defaults() *Settings {
 	return s
 }
 
-// GlobalDir returns the global agent configuration directory, ~/.pi/agent.
+// GlobalDir returns the global configuration directory, ~/.escape.
+// SessionRoot resolves the configured session root, honouring a leading ~.
+// It lives here rather than in the command layer because the RPC layer needs it
+// too, when a project switch re-reads settings for the new directory.
+func SessionRoot(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return session.DefaultRoot()
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			value = filepath.Join(home, strings.TrimPrefix(value, "~"))
+		}
+	}
+	if abs, err := filepath.Abs(value); err == nil {
+		return abs
+	}
+	return value
+}
+
+// GlobalDir returns the global configuration root. Escape keeps its own tree
+// rather than sharing another tool's, so this is ~/.escape: its own settings,
+// sessions, skills, and context files, and nothing of anyone else's.
 func GlobalDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		home = "."
 	}
-	return filepath.Join(home, ".pi", "agent")
+	return filepath.Join(home, ".escape")
 }
 
-// ProjectDir returns the project .pi directory for cwd. It starts at cwd and
+// ProjectDir returns the project .escape directory for cwd. It starts at cwd and
 // walks up to the git root (a directory containing .git) or the filesystem
-// root, returning the first <dir>/.pi found. When no ancestor has a .pi
-// directory it falls back to <cwd>/.pi, the location Load reads settings from.
+// root, returning the first <dir>/.escape found. When no ancestor has an
+// .escape directory it falls back to <cwd>/.escape, the location Load reads
+// settings from.
 func ProjectDir(cwd string) string {
 	dir, err := filepath.Abs(cwd)
 	if err != nil {
@@ -102,13 +127,13 @@ func ProjectDir(cwd string) string {
 	dir = filepath.Clean(dir)
 	start := dir
 	for {
-		pi := filepath.Join(dir, ".pi")
-		if st, err := os.Stat(pi); err == nil && st.IsDir() {
-			return pi
+		esc := filepath.Join(dir, ".escape")
+		if st, err := os.Stat(esc); err == nil && st.IsDir() {
+			return esc
 		}
 		// Stop the walk at the git root (a directory containing .git, which
 		// may be a file in worktrees) or the filesystem root. The root
-		// itself is checked for .pi first, so a .pi at the git root counts.
+		// itself is checked first, so an .escape at the git root counts.
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			break
 		}
@@ -118,12 +143,12 @@ func ProjectDir(cwd string) string {
 		}
 		dir = parent
 	}
-	return filepath.Join(start, ".pi")
+	return filepath.Join(start, ".escape")
 }
 
-// Load merges the global settings file (~/.pi/agent/settings.json) with the
-// project settings file (<cwd>/.pi/settings.json), project winning, and
-// applies the pi defaults to any field neither file sets. Missing files are
+// Load merges the global settings file (~/.escape/settings.json) with the
+// project settings file (<cwd>/.escape/settings.json), project winning, and
+// applies the defaults to any field neither file sets. Missing files are
 // not an error; malformed JSON is.
 func Load(cwd string) (*Settings, error) {
 	merged, err := defaultsMap()
@@ -134,7 +159,7 @@ func Load(cwd string) (*Settings, error) {
 	if err := mergeFile(merged, filepath.Join(GlobalDir(), "settings.json"), "global"); err != nil {
 		return nil, err
 	}
-	if err := mergeFile(merged, filepath.Join(cwd, ".pi", "settings.json"), "project"); err != nil {
+	if err := mergeFile(merged, filepath.Join(cwd, ".escape", "settings.json"), "project"); err != nil {
 		return nil, err
 	}
 
@@ -226,7 +251,7 @@ func SetSkillOverrides(cwd string, overrides []SkillOverride) error {
 		cleaned = append(cleaned, o)
 	}
 	sort.Slice(cleaned, func(i, j int) bool { return cleaned[i].Path < cleaned[j].Path })
-	return setSkillsKey(filepath.Join(cwd, ".pi", "settings.json"), "skillOverrides", cleaned)
+	return setSkillsKey(filepath.Join(cwd, ".escape", "settings.json"), "skillOverrides", cleaned)
 }
 
 func setSkillsKey(path string, key string, value any) error {
@@ -294,7 +319,7 @@ func mergeFile(merged map[string]any, path, scope string) error {
 
 // deepMerge merges overrides into base in place: nested maps merge
 // recursively, everything else (including arrays) is replaced by the
-// override. This matches pi's deepMergeObjects semantics.
+// override. Nested groups merge key by key rather than being replaced whole.
 func deepMerge(base, overrides map[string]any) {
 	for k, v := range overrides {
 		if sub, ok := v.(map[string]any); ok {

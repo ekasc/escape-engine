@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"sync"
+
 	"github.com/ekasc/escape-engine/internal/provider"
 	"github.com/ekasc/escape-engine/internal/session"
 )
@@ -11,6 +13,9 @@ import (
 // megabytes and hundreds of milliseconds per turn before the provider is called
 // at all.
 type entryCache struct {
+	// mu guards the cache. More than one goroutine reaches it: the turn, recap
+	// while a turn is running, and priming when a session is opened.
+	mu      sync.Mutex
 	entries []session.Entry
 	offset  int64
 	path    string
@@ -24,6 +29,8 @@ const appendReadWindow = 4 * 1024 * 1024
 // since the previous call. A different path, or a file that shrank, means the
 // cache describes a file that no longer exists, so it restarts from zero.
 func (c *entryCache) sinceAppends(path string) ([]session.Entry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.path != path {
 		c.entries = nil
 		c.offset = 0
@@ -100,4 +107,15 @@ func messagesFromEntries(entries []session.Entry, systemPrompt string) ([]provid
 		}
 	}
 	return msgs, nil
+}
+
+// prime reads a session into the cache without needing the result.
+//
+// The turn cannot begin until it has the whole transcript, and on a long
+// session that read is the largest thing between a message and the provider.
+// Opening a session is also when the transcript is read to display it, so
+// starting the parse then overlaps it with the time the person spends reading,
+// instead of charging it to their first message.
+func (c *entryCache) prime(path string) {
+	_, _ = c.sinceAppends(path)
 }

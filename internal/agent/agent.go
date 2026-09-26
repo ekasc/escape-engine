@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ekasc/escape-engine/internal/diagnostics"
 	"github.com/ekasc/escape-engine/internal/provider"
 	"github.com/ekasc/escape-engine/internal/session"
 	"github.com/ekasc/escape-engine/internal/settings"
@@ -48,8 +50,10 @@ func IsRecapRequest(req provider.Request) bool {
 
 // Options configures an Agent.
 type Options struct {
-	Store                 *session.Store
-	Provider              provider.Provider
+	Store    *session.Store
+	Provider provider.Provider
+	// SpillDir receives full tool output that was too large to keep inline.
+	SpillDir              string
 	Tools                 []tools.Tool
 	Cwd                   string
 	Model                 string
@@ -128,6 +132,16 @@ type Agent struct {
 	titleSet bool
 
 	systemPrompt string
+	// namingDone is closed when the concurrent title write finishes, or is nil
+	// when no title is being written. Recap copies the current title into the
+	// recap entry, so reading it before naming lands would persist an empty
+	// one and lose the session's name.
+	namingDone chan struct{}
+
+	// diag records what each turn cost, phase by phase, so a slow turn can be
+	// attributed instead of guessed at.
+	diag *diagnostics.Recorder
+
 	// history caches the parsed session entries so each turn reads only the
 	// bytes appended since the last one.
 	history       entryCache
@@ -141,6 +155,9 @@ type Agent struct {
 // New builds an agent. The store must already be open.
 func New(opts Options) *Agent {
 	opts = opts.withDefaults()
+	if opts.SpillDir == "" {
+		opts.SpillDir = filepath.Join(settings.GlobalDir(), "tool-output")
+	}
 	reg := tools.New(opts.Tools...)
 	a := &Agent{
 		opts:         opts,
@@ -160,6 +177,7 @@ func New(opts Options) *Agent {
 	if setter, ok := opts.Provider.(interface{ SetSessionID(string) }); ok && opts.Store != nil {
 		setter.SetSessionID(opts.Store.ID())
 	}
+	a.diag = diagnostics.NewRecorder()
 	return a
 }
 
@@ -204,6 +222,9 @@ func (a *Agent) Send(text string) (string, error) {
 	go a.runTurn(ctx, text)
 	return a.turnID, nil
 }
+
+// Diagnostics returns the turn recorder, which the RPC layer reads.
+func (a *Agent) Diagnostics() *diagnostics.Recorder { return a.diag }
 
 // SetModel changes the model used for subsequent turns.
 func (a *Agent) MaxTokens() int {
@@ -250,6 +271,9 @@ func (a *Agent) SwitchStore(store *session.Store) error {
 	if setter, ok := provider.(interface{ SetSessionID(string) }); ok {
 		setter.SetSessionID(store.ID())
 	}
+	// Parse the transcript in the background so the first message does not pay
+	// for it. The turn still reads it, just after the read has already happened.
+	go a.history.prime(store.Path())
 	return nil
 }
 
@@ -437,6 +461,23 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Everything the turn costs is attributed to one of these, so a slow turn
+	// names its own cause rather than needing a guess.
+	a.mu.Lock()
+	turnAt := a.turnStart
+	a.mu.Unlock()
+	phase := diagnostics.Turn{At: turnAt, ContextWindow: contextWindowFor(a.opts.Model)}
+	defer func() {
+		phase.TotalMs = time.Since(turnAt).Milliseconds()
+		a.mu.Lock()
+		reason := a.settleReason
+		a.mu.Unlock()
+		if reason != "" && reason != ReasonDone {
+			phase.Error = reason
+		}
+		a.diag.Record(phase)
+	}()
+
 	// 1. Persist the user message.
 	userMsg := &session.Message{
 		Role:      session.RoleUser,
@@ -453,15 +494,44 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 
 	// 2. Auto-name once per session: if no title exists yet, ask the provider
 	// for one and persist it as a session_info entry (best-effort).
+	//
+	// This runs alongside the turn rather than before it. Naming is a whole
+	// extra provider round trip, and it used to be the first thing the turn
+	// waited on, so the first token of the first message in a session arrived
+	// one model call late for a title nobody was reading yet. The store's
+	// Append is mutex-guarded, so writing the title while the turn streams is
+	// safe, and the title simply appears a moment later in the sidebar.
 	if !a.titleSet {
 		a.titleSet = true
-		if existing, err := session.Name(a.opts.Store.Path()); err == nil && existing == "" {
-			a.nameSession(ctx, text, userEntry.ID)
+		// The title is read out of the history the turn already keeps, not by
+		// re-reading the file. session.Name parses the whole transcript, which
+		// on a long session is hundreds of milliseconds before the first token
+		// for a boolean check.
+		titleAt := time.Now()
+		entries, titleErr := a.history.sinceAppends(a.opts.Store.Path())
+		phase.HistoryReadMs += time.Since(titleAt).Milliseconds()
+		if titleErr == nil && session.LastName(entries) == "" {
+			done := make(chan struct{})
+			a.mu.Lock()
+			a.namingDone = done
+			a.mu.Unlock()
+			go func() {
+				defer close(done)
+				defer func() {
+					a.mu.Lock()
+					if a.namingDone == done {
+						a.namingDone = nil
+					}
+					a.mu.Unlock()
+				}()
+				a.nameSession(ctx, text, userEntry.ID)
+			}()
 		}
 	}
 
 	// 3. The loop: model -> tools -> model until no tool calls remain.
 	for iter := 1; ; iter++ {
+		phase.Iterations = iter
 		if iter > a.opts.MaxIterations {
 			a.publish(Event{Event: EventError, Message: "max iterations reached"})
 			a.settle(ReasonError)
@@ -476,17 +546,24 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 		// nears the model's context window. Best-effort: a failure here must
 		// not kill the turn.
 		if a.opts.Settings.Compaction.Enabled {
-			if err := a.autoCompactIfNeeded(ctx); err != nil {
+			didCompact, err := a.autoCompactIfNeeded(ctx)
+			if didCompact {
+				phase.Compacted = true
+			}
+			if err != nil {
 				a.publish(Event{Event: EventError, Message: "compaction skipped: " + err.Error()})
 			}
 		}
 
+		readAt := time.Now()
 		entries, err := a.history.sinceAppends(a.opts.Store.Path())
+		phase.HistoryReadMs += time.Since(readAt).Milliseconds()
 		if err != nil {
 			a.publish(Event{Event: EventError, Message: "failed to read session: " + err.Error()})
 			a.settle(ReasonError)
 			return
 		}
+		buildAt := time.Now()
 		hist, err := messagesFromEntries(entries, a.systemPrompt)
 		if err != nil {
 			a.publish(Event{Event: EventError, Message: fmt.Sprintf("failed to build history: %v", err)})
@@ -494,7 +571,9 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 			return
 		}
 		req := provider.Request{Model: a.opts.Model, Messages: hist, Tools: a.specs, MaxTokens: a.opts.MaxTokens}
+		phase.BuildMs = time.Since(buildAt).Milliseconds()
 
+		requestAt := time.Now()
 		stream, err := a.streamWithRetry(ctx, req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -506,7 +585,10 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 			return
 		}
 
-		out, stopReason, err := a.consumeStream(ctx, turnID, stream, iter)
+		out, stopReason, firstAt, err := a.consumeStream(ctx, turnID, stream, iter)
+		if !firstAt.IsZero() {
+			phase.FirstTokenMs = firstAt.Sub(requestAt).Milliseconds()
+		}
 		stream.Close()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -549,18 +631,24 @@ func (o *turnOutput) empty() bool {
 
 // consumeStream reads a provider stream into a turnOutput, emitting
 // message_start/message_delta events as text arrives.
-func (a *Agent) consumeStream(ctx context.Context, turnID string, stream provider.Stream, iter int) (*turnOutput, string, error) {
+// consumeStream reads a provider stream to completion. It also reports when the
+// first event arrived, which is the only honest measure of time to first token.
+func (a *Agent) consumeStream(ctx context.Context, turnID string, stream provider.Stream, iter int) (*turnOutput, string, time.Time, error) {
+	var firstAt time.Time
 	out := &turnOutput{}
 	thinking := &thinkingFilter{}
 	stopReason := "stop"
 	a.publish(Event{Event: EventMessageStart, TurnID: turnID, Role: session.RoleAssistant, Iteration: iter})
 	for {
+		if firstAt.IsZero() {
+			firstAt = time.Now()
+		}
 		ev, err := stream.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return out, stopReason, err
+			return out, stopReason, firstAt, err
 		}
 		switch ev.Kind {
 		case provider.EventText:
@@ -584,9 +672,9 @@ func (a *Agent) consumeStream(ctx context.Context, turnID string, stream provide
 		a.publish(Event{Event: EventMessageDelta, TurnID: turnID, Role: session.RoleAssistant, Text: visible})
 	}
 	if ctx.Err() != nil {
-		return out, stopReason, ctx.Err()
+		return out, stopReason, firstAt, ctx.Err()
 	}
-	return out, stopReason, nil
+	return out, stopReason, firstAt, nil
 }
 
 // streamWithRetry calls the provider, retrying retryable errors with bounded
@@ -836,11 +924,21 @@ func (a *Agent) runOneTool(ctx context.Context, turnID string, tc provider.ToolC
 		}
 	}
 
+	// Large output is truncated on the way in, with the full text spilled to a
+	// file the model is told how to search. Keeping it whole costs a session a
+	// megabyte of disk and the same again in the parsed history cache, for
+	// output that is stale the moment the turn moves on.
+	stored := res.Output
+	if !instructionShapedTool(tc.Name) {
+		name := fmt.Sprintf("%s-%s.txt", a.opts.Store.ID(), tc.ID)
+		stored, _, _ = session.SpillToolOutput(res.Output, a.opts.SpillDir, name)
+	}
+
 	msg := &session.Message{
 		Role:       session.RoleToolResult,
 		ToolCallID: tc.ID,
 		ToolName:   tc.Name,
-		Content:    []session.Block{{Type: session.BlockText, Text: res.Output}},
+		Content:    []session.Block{{Type: session.BlockText, Text: stored}},
 		IsError:    res.IsError,
 		Timestamp:  session.NowMillis(),
 	}
@@ -955,6 +1053,7 @@ func (a *Agent) nameSession(ctx context.Context, text, parentID string) {
 // persists it as a session_info entry (carrying the existing title forward),
 // and returns the line. Safe to call while a turn is running.
 func (a *Agent) Recap(ctx context.Context) (string, error) {
+	a.waitForNaming(ctx)
 	entries, err := a.history.sinceAppends(a.opts.Store.Path())
 	if err != nil {
 		return "", err
@@ -1067,4 +1166,90 @@ func toSessionUsage(u provider.Usage) *session.Usage {
 		CacheWrite:  u.CacheWrite,
 		TotalTokens: u.TotalTokens,
 	}
+}
+
+// Model is the model the next request will use.
+func (a *Agent) Model() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.opts.Model
+}
+
+// ToolCount is how many tools a request carries.
+func (a *Agent) ToolCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.specs)
+}
+
+// HistoryLen is how many entries the session has been parsed into, which is the
+// input to every request build.
+func (a *Agent) HistoryLen() int {
+	entries, err := a.history.sinceAppends(a.opts.Store.Path())
+	if err != nil {
+		return 0
+	}
+	return len(entries)
+}
+
+// waitForNaming blocks until an in-flight title write has landed, or the context
+// is done. A recap that copies the title must not race the write, or it
+// persists an empty one.
+func (a *Agent) waitForNaming(ctx context.Context) {
+	a.mu.Lock()
+	done := a.namingDone
+	a.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// SetCwd changes the directory the agent works in, and rebinds everything that
+// was built for the previous one.
+//
+// Escape is spawned with a single --cwd, which used to mean the project was
+// whatever directory the shell happened to be launched from. Choosing a project
+// has to be able to change it, and three things are bound to it: the tools,
+// their advertised specs, and the system prompt. Leaving any of them pointing at
+// the old directory would mean editing files in one project while the model is
+// told about another.
+func (a *Agent) SetCwd(cwd string, toolSet []tools.Tool) {
+	a.mu.Lock()
+	if a.state == StateRunning {
+		a.mu.Unlock()
+		return
+	}
+	a.opts.Cwd = cwd
+	reg := tools.New(toolSet...)
+	a.reg = reg
+	a.specs = reg.Specs()
+	a.systemPrompt = buildSystemPrompt(a.opts)
+	a.mu.Unlock()
+}
+
+// instructionShapedTool reports whether a tool's output is instructions to the
+// model rather than an observation about the codebase.
+//
+// Truncating or pruning these is how an agent loses the rules it was given. A
+// skill body is a set of instructions, and durable memory holds the decisions
+// the person recorded; both are small and both are load-bearing, so they are
+// exempt from both truncation and the compaction prune.
+func instructionShapedTool(name string) bool {
+	switch name {
+	case "skill", "memory", "project_memory":
+		return true
+	default:
+		return false
+	}
+}
+
+// Cwd is the directory the agent is working in.
+func (a *Agent) Cwd() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.opts.Cwd
 }

@@ -38,7 +38,7 @@ func loadContextFileFromDir(dir string) (path, content string, ok bool) {
 }
 
 // ContextFiles returns the layered context-file section for the system
-// prompt: the global ~/.pi/agent context file, then each directory from the
+// prompt: the global ~/.escape context file, then each directory from the
 // filesystem root down to cwd (AGENTS.override.md replaces AGENTS.md and
 // CLAUDE.md in its directory). The text uses pi's <project_context> format.
 // Returns "" when no context files exist.
@@ -90,18 +90,18 @@ func (l *Loader) ContextFiles() string {
 }
 
 // SystemPrompt returns the system-prompt file content and whether it
-// REPLACES the default prompt: <cwd>/.pi/SYSTEM.md or ~/.pi/agent/SYSTEM.md
-// replace (true); <cwd>/.pi/APPEND_SYSTEM.md or ~/.pi/agent/APPEND_SYSTEM.md
+// REPLACES the default prompt: <cwd>/.escape/SYSTEM.md or ~/.escape/SYSTEM.md
+// replace (true); <cwd>/.escape/APPEND_SYSTEM.md or ~/.escape/APPEND_SYSTEM.md
 // append to the default prompt (false). Project files win over global ones.
 // Returns ("", false) when no file exists.
 func (l *Loader) SystemPrompt() (string, bool) {
-	if content, ok := readPromptFile(filepath.Join(absPath(l.cwd), ".pi", "SYSTEM.md")); ok {
+	if content, ok := readPromptFile(filepath.Join(absPath(l.cwd), ".escape", "SYSTEM.md")); ok {
 		return content, true
 	}
 	if content, ok := readPromptFile(filepath.Join(settings.GlobalDir(), "SYSTEM.md")); ok {
 		return content, true
 	}
-	if content, ok := readPromptFile(filepath.Join(absPath(l.cwd), ".pi", "APPEND_SYSTEM.md")); ok {
+	if content, ok := readPromptFile(filepath.Join(absPath(l.cwd), ".escape", "APPEND_SYSTEM.md")); ok {
 		return content, false
 	}
 	if content, ok := readPromptFile(filepath.Join(settings.GlobalDir(), "APPEND_SYSTEM.md")); ok {

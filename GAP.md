@@ -13,13 +13,13 @@ The complete CLI-to-GUI inventory lives in [`../FEATURE_MAP.md`](../FEATURE_MAP.
 - Context files, prompt templates, and skills.
 - Append-only JSONL sessions with titles, usage statistics, export, compaction, branch summaries, forking, cloning, and undo.
 - Bubble Tea terminal UI with daily-driver commands and history.
-- `serve` JSON-RPC mode and the pi-compatible `rpc` command/event mode used by the GPUIX shell.
+- `serve` JSON-RPC mode and the `rpc` command/event mode used by the GPUIX shell.
 
-## Compatibility boundary
+## Storage
 
-Escape keeps the pi-compatible JSONL shape, resource conventions, and RPC vocabulary where they are useful to existing readers. Product names, the Go module, the engine binary, environment variables, and the GPUIX shell use Escape terminology.
+Escape reads and writes only its own tree. Configuration, sessions, skills, and context files live under `~/.escape` and `<project>/.escape`, and nothing is written outside them.
 
-The default configuration and session roots remain under `~/.pi/agent` and `.pi` for compatibility. `ESCAPE_*` variables control Escape-specific runtime settings. Moving those storage roots is a separate migration decision.
+Earlier drafts shared another tool's directories and on-disk shape. That was a mistake: it made Escape's startup cost depend on another program's activity, put files in the store that Escape could not explain, and made it impossible to tell whose session a given file was. Escape took design inspiration from that tool; it shares no storage with it.
 
 ## Known gaps
 

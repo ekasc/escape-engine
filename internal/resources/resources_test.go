@@ -195,7 +195,7 @@ func TestParseFrontmatterPlainMultiline(t *testing.T) {
 func TestContextFilesLayering(t *testing.T) {
 	home := withHome(t)
 	cwd := filepath.Join(home, "proj", "sub")
-	global := filepath.Join(home, ".pi", "agent", "AGENTS.md")
+	global := filepath.Join(home, ".escape", "AGENTS.md")
 	root := filepath.Join(home, "proj", "CLAUDE.md")
 	inner := filepath.Join(cwd, "AGENTS.md")
 	writeFile(t, global, "global instructions")
@@ -248,8 +248,8 @@ func TestSystemPromptFiles(t *testing.T) {
 	t.Run("project system", func(t *testing.T) {
 		home := withHome(t)
 		cwd := filepath.Join(home, "proj")
-		writeFile(t, filepath.Join(cwd, ".pi", "SYSTEM.md"), "project system")
-		writeFile(t, filepath.Join(home, ".pi", "agent", "SYSTEM.md"), "global system")
+		writeFile(t, filepath.Join(cwd, ".escape", "SYSTEM.md"), "project system")
+		writeFile(t, filepath.Join(home, ".escape", "SYSTEM.md"), "global system")
 
 		content, replace := newLoader(cwd).SystemPrompt()
 		if !replace || content != "project system" {
@@ -261,7 +261,7 @@ func TestSystemPromptFiles(t *testing.T) {
 	t.Run("global system", func(t *testing.T) {
 		home := withHome(t)
 		cwd := filepath.Join(home, "proj")
-		writeFile(t, filepath.Join(home, ".pi", "agent", "SYSTEM.md"), "global system")
+		writeFile(t, filepath.Join(home, ".escape", "SYSTEM.md"), "global system")
 
 		content, replace := newLoader(cwd).SystemPrompt()
 		if !replace || content != "global system" {
@@ -273,8 +273,8 @@ func TestSystemPromptFiles(t *testing.T) {
 	t.Run("append system", func(t *testing.T) {
 		home := withHome(t)
 		cwd := filepath.Join(home, "proj")
-		writeFile(t, filepath.Join(cwd, ".pi", "APPEND_SYSTEM.md"), "append me")
-		writeFile(t, filepath.Join(home, ".pi", "agent", "APPEND_SYSTEM.md"), "global append")
+		writeFile(t, filepath.Join(cwd, ".escape", "APPEND_SYSTEM.md"), "append me")
+		writeFile(t, filepath.Join(home, ".escape", "APPEND_SYSTEM.md"), "global append")
 
 		content, replace := newLoader(cwd).SystemPrompt()
 		if replace || content != "append me" {
@@ -309,18 +309,18 @@ func TestSkillsDiscovery(t *testing.T) {
 	// cwd is inside a git repo rooted at repo/.
 	writeFile(t, filepath.Join(home, "repo", ".git", "HEAD"), "")
 
-	// ~/.pi/agent/skills: dirs + root .md files.
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "alpha", "SKILL.md"),
+	// ~/.escape/skills: dirs + root .md files.
+	writeFile(t, filepath.Join(home, ".escape", "skills", "alpha", "SKILL.md"),
 		"---\nname: alpha\ndescription: Alpha skill.\n---\n# Alpha\n")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "root-skill.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "root-skill.md"),
 		"---\nname: root-skill\ndescription: Root md skill.\n---\n# Root\n")
 	// Recursive discovery.
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "nested", "deep", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "nested", "deep", "SKILL.md"),
 		"---\nname: deep\ndescription: Deep skill.\n---\n# Deep\n")
 	// node_modules and hidden dirs are skipped.
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "node_modules", "dep", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "node_modules", "dep", "SKILL.md"),
 		"---\nname: dep\ndescription: Dep skill.\n---\n")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", ".hidden", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", ".hidden", "SKILL.md"),
 		"---\nname: hidden\ndescription: Hidden skill.\n---\n")
 
 	// ~/.agents/skills: dirs only, root .md files are ignored.
@@ -330,9 +330,9 @@ func TestSkillsDiscovery(t *testing.T) {
 		"---\nname: agents-root\ndescription: Should be ignored.\n---\n")
 
 	// Project .pi/skills.
-	writeFile(t, filepath.Join(cwd, ".pi", "skills", "gamma", "SKILL.md"),
+	writeFile(t, filepath.Join(cwd, ".escape", "skills", "gamma", "SKILL.md"),
 		"---\nname: gamma\ndescription: Gamma skill.\n---\n# Gamma\n")
-	writeFile(t, filepath.Join(cwd, ".pi", "skills", "proj-root.md"),
+	writeFile(t, filepath.Join(cwd, ".escape", "skills", "proj-root.md"),
 		"---\nname: proj-root\ndescription: Project root md skill.\n---\n")
 
 	// .agents/skills walking up: at pkg (cwd) and at the repo root; the
@@ -362,15 +362,15 @@ func TestSkillsDiscovery(t *testing.T) {
 func TestSkillsFrontmatterValidation(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "good", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "good", "SKILL.md"),
 		"---\nname: good\nallowed-tools: [Read, Bash(x)]\ndescription: Good skill.\n---\n# Good\n")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "no-desc", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "no-desc", "SKILL.md"),
 		"---\nname: no-desc\n---\nbody")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "bad-name", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "bad-name", "SKILL.md"),
 		"---\nname: Bad_Name\ndescription: Has a bad name, still loads.\n---\nbody")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "no-name", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "no-name", "SKILL.md"),
 		"---\ndescription: Uses dir name.\n---\nbody")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "disabled", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "disabled", "SKILL.md"),
 		"---\nname: disabled\ndescription: Hidden from the model.\ndisable-model-invocation: true\n---\nbody")
 
 	skills := newLoader(cwd).Skills()
@@ -384,7 +384,7 @@ func TestSkillsFrontmatterValidation(t *testing.T) {
 	if good.Body != "# Good" {
 		t.Errorf("body = %q", good.Body)
 	}
-	if good.Path != filepath.Join(home, ".pi", "agent", "skills", "good", "SKILL.md") {
+	if good.Path != filepath.Join(home, ".escape", "skills", "good", "SKILL.md") {
 		t.Errorf("path = %q", good.Path)
 	}
 	// Name falls back to the parent directory name.
@@ -401,7 +401,7 @@ func TestSkillsFrontmatterValidation(t *testing.T) {
 func TestQuietLoaderSuppressesSkillWarnings(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "dup", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "dup", "SKILL.md"),
 		"---\nname: dup\ndescription: First copy.\n---\n")
 	writeFile(t, filepath.Join(home, ".agents", "skills", "dup", "SKILL.md"),
 		"---\nname: dup\ndescription: Second copy.\n---\n")
@@ -420,7 +420,7 @@ func TestQuietLoaderSuppressesSkillWarnings(t *testing.T) {
 func TestSkillsCollisionFirstWins(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "dup", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "dup", "SKILL.md"),
 		"---\nname: dup\ndescription: First copy.\n---\n")
 	writeFile(t, filepath.Join(home, ".agents", "skills", "dup", "SKILL.md"),
 		"---\nname: dup\ndescription: Second copy.\n---\n")
@@ -451,9 +451,9 @@ func TestSkillsSettingsPaths(t *testing.T) {
 func TestSkillsXML(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "alpha", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "alpha", "SKILL.md"),
 		"---\nname: alpha\ndescription: Alpha <skill> & co.\n---\n")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "hidden-skill", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "hidden-skill", "SKILL.md"),
 		"---\nname: hidden-skill\ndescription: Hidden.\ndisable-model-invocation: true\n---\n")
 
 	xml := newLoader(cwd).SkillsXML()
@@ -476,7 +476,7 @@ func TestSkillsXML(t *testing.T) {
 	// No visible skills -> empty.
 	t.Run("no visible skills", func(t *testing.T) {
 		home := withHome(t)
-		writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "hidden-skill", "SKILL.md"),
+		writeFile(t, filepath.Join(home, ".escape", "skills", "hidden-skill", "SKILL.md"),
 			"---\nname: hidden-skill\ndescription: Hidden.\ndisable-model-invocation: true\n---\n")
 		if xml := newLoader(t.TempDir()).SkillsXML(); xml != "" {
 			t.Errorf("expected empty XML, got %q", xml)
@@ -487,7 +487,7 @@ func TestSkillsXML(t *testing.T) {
 func TestSkillCommand(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "demo", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "demo", "SKILL.md"),
 		"---\nname: demo\ndescription: Demo.\n---\n# Demo\n\nRun the script:\n```bash\n./scripts/run.sh\n```\n")
 
 	got, ok := newLoader(cwd).SkillCommand("demo", "run tests")
@@ -497,7 +497,7 @@ func TestSkillCommand(t *testing.T) {
 	if !strings.HasPrefix(got, `<skill name="demo" location="`) {
 		t.Errorf("bad skill block start:\n%s", got)
 	}
-	if !strings.Contains(got, "References are relative to "+filepath.Join(home, ".pi", "agent", "skills", "demo")+".\n") {
+	if !strings.Contains(got, "References are relative to "+filepath.Join(home, ".escape", "skills", "demo")+".\n") {
 		t.Errorf("missing references hint:\n%s", got)
 	}
 	if !strings.Contains(got, "# Demo\n\nRun the script:") {
@@ -523,15 +523,15 @@ func TestSkillCommand(t *testing.T) {
 func TestTemplatesDiscovery(t *testing.T) {
 	home := withHome(t)
 	cwd := filepath.Join(home, "proj")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "prompts", "global.md"),
+	writeFile(t, filepath.Join(home, ".escape", "prompts", "global.md"),
 		"---\ndescription: Global template\n---\nGlobal body $1")
 	// Subdirectories are not scanned.
-	writeFile(t, filepath.Join(home, ".pi", "agent", "prompts", "sub", "nested.md"),
+	writeFile(t, filepath.Join(home, ".escape", "prompts", "sub", "nested.md"),
 		"---\ndescription: Nested\n---\nbody")
-	writeFile(t, filepath.Join(cwd, ".pi", "prompts", "review.md"),
+	writeFile(t, filepath.Join(cwd, ".escape", "prompts", "review.md"),
 		"---\ndescription: Review staged changes\nargument-hint: \"<PR-URL>\"\n---\nReview body.")
 	// No frontmatter: description falls back to the first body line.
-	writeFile(t, filepath.Join(cwd, ".pi", "prompts", "bare.md"),
+	writeFile(t, filepath.Join(cwd, ".escape", "prompts", "bare.md"),
 		"First non-empty line is the description.\n\nMore body.")
 
 	templates := newLoader(cwd).Templates()
@@ -575,7 +575,7 @@ func TestExpandTemplateArgs(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
 	body := "create $1 with $2 and ${3:-default}; all: $@; from2: ${@:2}; two-from2: ${@:2:2}; def: ${1:-fallback}; empty-def: ${2:-fallback}; args-def: ${@:-allfallback}; ARGS: $ARGUMENTS; zero: $0; "
-	writeFile(t, filepath.Join(home, ".pi", "agent", "prompts", "t.md"), "---\ndescription: T\n---\n"+body)
+	writeFile(t, filepath.Join(home, ".escape", "prompts", "t.md"), "---\ndescription: T\n---\n"+body)
 
 	got, ok := newLoader(cwd).ExpandTemplate("t", `Button "click handler"`)
 	if !ok {
@@ -587,7 +587,7 @@ func TestExpandTemplateArgs(t *testing.T) {
 	}
 
 	// ${@:N} past the end and ${@:N:L} clipping; ${@:0} is treated as ${@:1}.
-	writeFile(t, filepath.Join(home, ".pi", "agent", "prompts", "slice.md"), "---\ndescription: Slice\n---\n[${@:5}] [${@:1:2}] [${@:0}] [${@:2:5}]")
+	writeFile(t, filepath.Join(home, ".escape", "prompts", "slice.md"), "---\ndescription: Slice\n---\n[${@:5}] [${@:1:2}] [${@:0}] [${@:2:5}]")
 	got, _ = newLoader(cwd).ExpandTemplate("slice", "a b")
 	want = "[] [a b] [a b] [b]"
 	if got != want {
@@ -603,9 +603,9 @@ func TestExpandTemplateArgs(t *testing.T) {
 func TestGetCommands(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
-	writeFile(t, filepath.Join(home, ".pi", "agent", "skills", "alpha", "SKILL.md"),
+	writeFile(t, filepath.Join(home, ".escape", "skills", "alpha", "SKILL.md"),
 		"---\nname: alpha\ndescription: Alpha skill.\n---\n")
-	writeFile(t, filepath.Join(home, ".pi", "agent", "prompts", "review.md"),
+	writeFile(t, filepath.Join(home, ".escape", "prompts", "review.md"),
 		"---\ndescription: Review changes\nargument-hint: \"<X>\"\n---\nbody")
 
 	cmds := newLoader(cwd).GetCommands()

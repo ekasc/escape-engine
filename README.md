@@ -10,10 +10,10 @@ Escape is not a Node runtime and does not load TypeScript extensions. The engine
 - Tools: `bash`, `read`, `write`, `edit`, `grep`, `glob`, `question`, and web search.
 - Providers: OpenAI-compatible HTTP, OpenCode Go, OpenCode Zen, Codex OAuth, and a deterministic fake provider.
 - Terminal UI: Bubble Tea v2, Bubbles textarea and viewport, Lip Gloss styling, history, completion, session switching, branching, review, diff, status, and compaction commands.
-- Sessions: append-only JSONL with a pi-compatible v3 shape.
+- Sessions: append-only JSONL, version 3 on-disk shape.
 - Settings: merged global and project configuration, tool selection, provider defaults, reasoning level, approval mode, and session directory.
 - Resources: context files, prompt templates, and skills.
-- Runtime control: stdio JSON-RPC `serve` mode and the pi-compatible `rpc` command/event mode used by the GPUIX shell.
+- Runtime control: stdio JSON-RPC `serve` mode and the `rpc` command/event mode used by the GPUIX shell.
 - Safety: explicit approval requests for side-effecting tools, bounded retries, cancellation, and branch-safe session operations.
 
 ## Build
@@ -81,7 +81,7 @@ The engine reads these environment variables:
 | `ESCAPE_OPENCODE_ZEN_API_KEY` | Escape-owned OpenCode Zen key override |
 | `ESCAPE_CREDENTIALS_FILE` | Escape credential file path |
 
-Settings merge `~/.pi/agent/settings.json` with `<cwd>/.pi/settings.json`. These paths and the JSONL shape remain compatible with the pi ecosystem. Escape-specific environment variables and the `escape` binary do not use the old product names.
+Settings merge `~/.escape/settings.json` with `<cwd>/.escape/settings.json`. Escape reads and writes only its own tree: nothing of another tool's is shared, and nothing is written outside `~/.escape` and `<project>/.escape`. Escape-specific environment variables and the `escape` binary do not use the old product names.
 
 ## RPC modes
 
@@ -101,7 +101,7 @@ The shell can start the RPC process without creating a session path. Provider cr
 
 ## Session files
 
-Sessions are append-only JSONL under `~/.pi/agent/sessions/<project-slug>/` by default. Set `ESCAPE_SESSIONS_DIR` to choose another root. The on-disk shape remains compatible with pi-style readers:
+Sessions are append-only JSONL under `~/.escape/sessions/<project-slug>/` by default. Set `ESCAPE_SESSIONS_DIR` to choose another root. The on-disk shape is:
 
 - `session` header entries
 - `message` entries with `message.role`, `message.content`, and numeric timestamps
@@ -136,7 +136,7 @@ engine/
   internal/agent      Agent loop, events, queue, compaction
   internal/provider   Streaming providers, OpenCode login, and OAuth
   internal/resources  Context, skills, and prompt templates
-  internal/rpc        JSON-RPC and pi-compatible command protocols
+  internal/rpc        JSON-RPC and the command/event protocol
   internal/session    JSONL session store, branching, export, stats
   internal/settings   Global and project settings
   internal/tools      File, shell, search, and interaction tools

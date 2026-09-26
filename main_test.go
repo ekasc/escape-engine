@@ -56,7 +56,7 @@ func TestLatestSessionForCwd(t *testing.T) {
 func TestConfiguredSessionRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if got := configuredSessionRoot("~/.pi/sessions"); got != filepath.Join(home, ".pi", "sessions") {
+	if got := configuredSessionRoot("~/.escape/sessions"); got != filepath.Join(home, ".escape", "sessions") {
 		t.Fatalf("tilde session root = %q", got)
 	}
 	if got := configuredSessionRoot("relative/sessions"); !filepath.IsAbs(got) {
@@ -183,7 +183,7 @@ func TestAskUsesSettingsModelDefault(t *testing.T) {
 	cwd := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("ESCAPE_SESSIONS_DIR", root)
-	settingsDir := filepath.Join(cwd, ".pi")
+	settingsDir := filepath.Join(cwd, ".escape")
 	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestAskRejectsApprovalSettings(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("HOME", home)
-	settingsDir := filepath.Join(cwd, ".pi")
+	settingsDir := filepath.Join(cwd, ".escape")
 	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestReplUsesSettingsProviderDefault(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("ESCAPE_PROVIDER", "")
 	t.Setenv("ESCAPE_API_KEY", "test-key")
-	settingsDir := filepath.Join(cwd, ".pi")
+	settingsDir := filepath.Join(cwd, ".escape")
 	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestReplUsesSettingsModelDefault(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("HOME", home)
-	settingsDir := filepath.Join(cwd, ".pi")
+	settingsDir := filepath.Join(cwd, ".escape")
 	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestReplApprovalSettingAndCLIPrecedence(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("HOME", home)
-	settingsDir := filepath.Join(cwd, ".pi")
+	settingsDir := filepath.Join(cwd, ".escape")
 	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

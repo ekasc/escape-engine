@@ -61,16 +61,16 @@ func (t *TokenSet) Valid() bool {
 }
 
 // OAuthPath returns the token store path: ESCAPE_OAUTH_FILE, else
-// ~/.pi/agent/oauth.json.
+// ~/.escape/oauth.json.
 func OAuthPath() string {
 	if p := os.Getenv("ESCAPE_OAUTH_FILE"); p != "" {
 		return p
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".pi/agent/oauth.json"
+		return ".escape/oauth.json"
 	}
-	return filepath.Join(home, ".pi", "agent", "oauth.json")
+	return filepath.Join(home, ".escape", "oauth.json")
 }
 
 // LoadTokens reads the OAuth token store.

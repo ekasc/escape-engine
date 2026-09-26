@@ -83,8 +83,14 @@ func TestContextWindowFor(t *testing.T) {
 	if contextWindowFor("gpt-5.6-luna") != 272000 {
 		t.Fatal("gpt-5.6-luna window wrong")
 	}
-	if contextWindowFor("unknown-model") != 200000 {
+	if contextWindowFor("unknown-model") != DefaultContextWindow {
 		t.Fatal("default window wrong")
+	}
+	// The fallback must sit below the windows of the models most sessions run
+	// on. Guessing high does not merely compact late, it sends a request the
+	// provider rejects.
+	if DefaultContextWindow >= 200000 {
+		t.Fatalf("default window %d is optimistic; an unknown model then fails instead of compacting", DefaultContextWindow)
 	}
 }
 

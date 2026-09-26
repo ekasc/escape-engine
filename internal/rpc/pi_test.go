@@ -65,6 +65,9 @@ func newPiTestServer(t *testing.T, handler func(ctx context.Context, req provide
 		sessionPath,
 		ctrl,
 		outW,
+		func(cwd, sessionRoot string, set *settings.Settings) ([]tools.Tool, error) {
+			return tools.Default(tools.Deps{Cwd: cwd, SessionRoot: sessionRoot, Control: ctrl}), nil
+		},
 	)
 	if err != nil {
 		t.Fatalf("NewPiServer: %v", err)

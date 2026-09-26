@@ -83,7 +83,7 @@ func TestTUICommandCompletionIncludesFollowup(t *testing.T) {
 
 func TestTUIResourceCommandCompletion(t *testing.T) {
 	cwd := t.TempDir()
-	prompts := filepath.Join(cwd, ".pi", "prompts")
+	prompts := filepath.Join(cwd, ".escape", "prompts")
 	if err := os.MkdirAll(prompts, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestTUIResourceCommandCompletion(t *testing.T) {
 
 func TestTUIResourceSkillCompletion(t *testing.T) {
 	cwd := t.TempDir()
-	skillDir := filepath.Join(cwd, ".pi", "skills", "demo")
+	skillDir := filepath.Join(cwd, ".escape", "skills", "demo")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

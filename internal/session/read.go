@@ -3,6 +3,8 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -312,4 +314,153 @@ func Since(path string, from int64, maxBytes int64) ([]Entry, int64, error) {
 		consumed = i + 1
 	}
 	return parseEntries(raw[:consumed]), from + int64(consumed), nil
+}
+
+// Page is a window of transcript entries, bounded in both directions.
+type Page struct {
+	Entries []Entry `json:"entries"`
+	// Leaf is the last entry id, the cursor for reading what comes next.
+	Leaf string `json:"leafId"`
+	// Earliest is the first entry id, the cursor for reading further back.
+	Earliest string `json:"earliestId"`
+	// HasMore reports whether anything precedes the window.
+	HasMore bool `json:"hasMore"`
+	// Total is the number of entries in the file, when it was counted.
+	Total int `json:"total,omitempty"`
+}
+
+// DefaultPageSize is how much of a transcript is loaded before someone scrolls
+// back for more. It is a page of reading, not a budget: a person reading a
+// conversation needs the recent turns, not all twelve thousand.
+const DefaultPageSize = 200
+
+// PageBefore returns up to limit entries ending at the entry just before
+// beforeID, so a caller can walk backwards through a long transcript.
+//
+// It reads only the file's tail rather than parsing the whole thing, because
+// the failure this prevents is a 50MB read and a twelve-thousand node render
+// just to show the most recent exchange.
+func PageBefore(path, beforeID string, limit int) (Page, error) {
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	entries, err := readTailWindow(path, beforeID, limit)
+	if err != nil {
+		return Page{}, err
+	}
+	content := filterContent(entries)
+	total := len(content)
+
+	// The cursor is located in the whole window before anything is truncated,
+	// because truncating to the newest limit would put a cursor at the start of
+	// the window at index zero and make the page before it look empty.
+	cut := -1
+	if beforeID != "" {
+		cut = indexOfEntry(content, beforeID)
+		if cut < 0 {
+			// The cursor is further back than the window reached, which the
+			// read loop normally prevents. Treating it as "at the start" would
+			// silently skip entries, so say the page is unfinished instead.
+			return Page{Earliest: content[0].ID, HasMore: true, Total: total}, nil
+		}
+	} else {
+		cut = total
+	}
+
+	// Take up to limit entries ending just before the cursor. HasMore is
+	// decided by whether the window reached the start of the transcript, not by
+	// the page being full: the last page of a session is usually full too.
+	start := cut - limit
+	if start < 0 {
+		start = 0
+	}
+	page := Page{Entries: content[start:cut], HasMore: start > 0, Total: total}
+	if len(page.Entries) > 0 {
+		page.Earliest = page.Entries[0].ID
+		page.Leaf = page.Entries[len(page.Entries)-1].ID
+	}
+	return page, nil
+}
+
+// readTailWindow reads the last n entries by reading the file's tail in
+// chunks, so the cost is proportional to what is returned rather than to the
+// size of the transcript.
+//
+// When a cursor is supplied the window keeps growing backwards until it contains
+// that entry, because every page asks for the same tail and a fixed window would
+// return the same page forever.
+func readTailWindow(path, beforeID string, n int) ([]Entry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	// Read a generous tail: entries are small, and over-reading a little is
+	// far cheaper than a second pass. It grows if the window fills up.
+	window := int64(256 * 1024)
+	const maxWindow = 64 * 1024 * 1024
+	var found []Entry
+	for window <= maxWindow {
+		offset := int64(0)
+		if info.Size() > window {
+			offset = info.Size() - window
+		}
+		buf := make([]byte, info.Size()-offset)
+		if _, err := f.ReadAt(buf, offset); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		if offset > 0 {
+			// The first line is probably cut in half by the offset.
+			if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+				buf = buf[i+1:]
+			}
+		}
+		found = parseEntries(buf)
+		content := filterContent(found)
+		covered := int64(len(buf)) >= info.Size()
+		if covered {
+			return found, nil
+		}
+		if beforeID == "" {
+			// No cursor: the newest n entries are enough once we have more
+			// than n of them, or once we have read the whole file.
+			if len(content) > n {
+				return found, nil
+			}
+		} else if idx := indexOfEntry(content, beforeID); idx > 0 {
+			// The cursor is in this window with something behind it, so the
+			// page before it is here. Reaching the cursor exactly at the start
+			// of the window is not enough: there would be nothing to return.
+			return found, nil
+		} else if idx == 0 && covered {
+			return found, nil
+		}
+		window *= 4
+	}
+	return found, nil
+}
+
+func indexOfEntry(entries []Entry, id string) int {
+	for i, e := range entries {
+		if e.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func filterContent(entries []Entry) []Entry {
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == TypeSession {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }

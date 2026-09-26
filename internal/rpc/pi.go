@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,8 +15,12 @@ import (
 	"sync"
 	"time"
 
+	"bytes"
+
 	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/diagnostics"
 	"github.com/ekasc/escape-engine/internal/memory"
+	"github.com/ekasc/escape-engine/internal/project"
 	"github.com/ekasc/escape-engine/internal/provider"
 	"github.com/ekasc/escape-engine/internal/resources"
 	"github.com/ekasc/escape-engine/internal/session"
@@ -36,10 +41,14 @@ type PiServer struct {
 	root string
 	ctrl *session.Control
 
-	mu     sync.Mutex
-	agent  *agent.Agent
-	store  *session.Store
-	loader *resources.Loader
+	mu       sync.Mutex
+	agent    *agent.Agent
+	store    *session.Store
+	loader   *resources.Loader
+	projects *project.Store
+	// buildTools constructs the tool set for a directory. The command layer
+	// owns that assembly, so it is injected rather than duplicated here.
+	buildTools func(cwd, sessionRoot string, set *settings.Settings) ([]tools.Tool, error)
 
 	outMu sync.Mutex
 	out   io.Writer
@@ -76,6 +85,7 @@ type piRequest struct {
 	Cwd        string   `json:"cwd"`
 	EntryID    string   `json:"entryId"`
 	Since      string   `json:"since"`
+	Limit      int      `json:"limit"`
 	FromID     string   `json:"fromId"`
 	TargetID   string   `json:"targetId"`
 	Answer     string   `json:"answer"`
@@ -111,9 +121,17 @@ type piResponse struct {
 }
 
 // NewPiServer opens the session at sessionPath and builds the agent.
-func NewPiServer(prov provider.Provider, ts []tools.Tool, set *settings.Settings, cwd, root, sessionPath string, ctrl *session.Control, out io.Writer) (*PiServer, error) {
+// ToolBuilder assembles the tool set for a directory. It is injected so the
+// command layer keeps ownership of that assembly and a project switch uses
+// exactly the same code path as a fresh start.
+type ToolBuilder func(cwd, sessionRoot string, set *settings.Settings) ([]tools.Tool, error)
+
+func NewPiServer(prov provider.Provider, ts []tools.Tool, set *settings.Settings, cwd, root, sessionPath string, ctrl *session.Control, out io.Writer, buildTools ToolBuilder) (*PiServer, error) {
 	if set == nil {
 		set = settings.Defaults()
+	}
+	if buildTools == nil {
+		return nil, errors.New("a tool builder is required")
 	}
 	s := &PiServer{
 		prov: prov, ts: ts, set: set, cwd: cwd, root: root, ctrl: ctrl, out: out,
@@ -122,6 +140,8 @@ func NewPiServer(prov provider.Provider, ts []tools.Tool, set *settings.Settings
 		steeringMode:   set.SteeringMode,
 		followUpMode:   set.FollowUpMode,
 		loader:         resources.New(cwd, set),
+		projects:       project.NewStore(settings.GlobalDir()),
+		buildTools:     buildTools,
 	}
 	if err := s.buildAgent(sessionPath); err != nil {
 		return nil, err
@@ -844,6 +864,86 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 	case "get_fork_messages":
 		msgs, err := session.GetForkMessages(s.store.Path())
 		s.finish(req, cmd, map[string]any{"messages": msgs}, err)
+	case "list_projects":
+		list, listErr := s.projects.List()
+		s.finish(req, cmd, map[string]any{"projects": list, "current": s.cwd}, listErr)
+	case "add_project":
+		if strings.TrimSpace(req.Path) == "" {
+			s.finish(req, cmd, nil, errors.New("a project path is required"))
+			return
+		}
+		entry, added, addErr := s.projects.Add(req.Path, time.Now().Format(time.RFC3339))
+		if addErr != nil {
+			s.finish(req, cmd, nil, addErr)
+			return
+		}
+		s.finish(req, cmd, map[string]any{"project": entry, "added": added}, nil)
+	case "remove_project":
+		if strings.TrimSpace(req.Path) == "" {
+			s.finish(req, cmd, nil, errors.New("a project path is required"))
+			return
+		}
+		removed, rmErr := s.projects.Remove(req.Path)
+		s.finish(req, cmd, map[string]any{"removed": removed}, rmErr)
+	case "switch_project":
+		// Switching project and switching session are the same operation from
+		// here: both rebind the store, the tools, and the system prompt to a
+		// directory. Doing it in one place is what keeps them consistent.
+		if strings.TrimSpace(req.Path) == "" {
+			s.finish(req, cmd, nil, errors.New("a project path is required"))
+			return
+		}
+		if err := s.switchProject(req.Path); err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		s.finish(req, cmd, map[string]any{"cwd": s.cwd}, nil)
+	case "get_diagnostics", "write_diagnostics":
+		// Timings the engine recorded on its own, so a slow turn can be read
+		// rather than guessed at. Recording costs nothing when nobody asks.
+		snap := s.diagnosticsSnapshot()
+		snap.Model = s.agent.Model()
+		snap.Provider = s.set.DefaultProvider
+		snap.Thinking = s.set.DefaultThinkingLevel
+		snap.SessionID = s.store.ID()
+		snap.SessionPath = s.store.Path()
+		if st, statErr := os.Stat(s.store.Path()); statErr == nil {
+			snap.SessionSize = st.Size()
+		}
+		snap.SessionEntries = s.agent.HistoryLen()
+		snap.Skills = len(s.loader.Skills())
+		snap.Tools = s.agent.ToolCount()
+		snap.Version = Version
+
+		if cmd == "write_diagnostics" {
+			// Writing is how a report gets to whoever is debugging: a path they
+			// can read, rather than something they have to copy out of a window.
+			out := req.Output
+			if out == "" {
+				out = filepath.Join(os.TempDir(), "escape-diagnostics-"+time.Now().Format("20060102-150405")+".txt")
+			}
+			var buf bytes.Buffer
+			diagnostics.WriteReport(&buf, snap)
+			writeErr := os.WriteFile(out, buf.Bytes(), 0o600)
+			s.finish(req, cmd, map[string]any{"path": out, "report": buf.String()}, writeErr)
+			return
+		}
+		s.finish(req, cmd, snap, nil)
+	case "get_page":
+		// A window of the transcript rather than the whole thing. Reading a
+		// 50MB session in full to draw the last exchange is the cost this
+		// exists to avoid, so the shell asks for a page and scrolls back for
+		// more.
+		readPath := s.store.Path()
+		if req.Path != "" {
+			readPath = req.Path
+		}
+		page, pageErr := session.PageBefore(readPath, req.Since, req.Limit)
+		if pageErr != nil {
+			s.finish(req, cmd, nil, pageErr)
+			return
+		}
+		s.finish(req, cmd, page, nil)
 	case "get_entries":
 		// An explicit sessionPath lets the shell read another session's
 		// transcript without switching the engine's active (and possibly
@@ -1065,3 +1165,102 @@ var openCodeZenModels = []string{
 }
 
 var openAIModels = []string{"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
+
+// Version is reported in diagnostics so a reading can be tied to a build.
+const Version = "0.1.0"
+
+// diagnosticsSnapshot collects what a diagnostics read reports. It is built on
+// demand and never cached, so a reading always reflects the process as it is.
+func (s *PiServer) diagnosticsSnapshot() diagnostics.Snapshot {
+	snap := s.agent.Diagnostics().Snapshot()
+	snap.Model = s.agent.Model()
+	snap.Provider = s.set.DefaultProvider
+	snap.Thinking = s.set.DefaultThinkingLevel
+	snap.SessionID = s.store.ID()
+	snap.SessionPath = s.store.Path()
+	if st, err := os.Stat(s.store.Path()); err == nil {
+		snap.SessionSize = st.Size()
+	}
+	snap.SessionEntries = s.agent.HistoryLen()
+	snap.Skills = len(s.loader.Skills())
+	snap.Tools = s.agent.ToolCount()
+	snap.Version = Version
+	return snap
+}
+
+// switchProject makes dir the directory Escape works in.
+//
+// Four things are bound to the working directory: the session store, the tool
+// set, the resource loader that finds project skills and context files, and the
+// settings that cascade from the project's own .escape directory. Rebinding only
+// some of them is how an agent ends up editing one project while the model is
+// told about another, so they are rebound together or not at all.
+func (s *PiServer) switchProject(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	abs = filepath.Clean(abs)
+	info, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", abs)
+	}
+
+	// A project switch is refused mid-turn for the same reason a session switch
+	// is: the running turn was built against the previous directory.
+	s.mu.Lock()
+	running := s.agent.State().State == agent.StateRunning
+	s.mu.Unlock()
+	if running {
+		return errors.New("cannot switch project while the agent is running")
+	}
+
+	// Project settings may differ, so they are reloaded for the new directory
+	// before anything is built from them.
+	set, err := settings.Load(abs)
+	if err != nil {
+		return err
+	}
+	sessionRoot := settings.SessionRoot(set.SessionDir)
+	toolSet, err := s.buildTools(abs, sessionRoot, set)
+	if err != nil {
+		return err
+	}
+
+	// Capture everything the switch overwrites, so a failure part-way through
+	// can put it back rather than leaving a server that is half in each project.
+	s.mu.Lock()
+	prevCwd, prevSet, prevRoot := s.cwd, s.set, s.root
+	prevTools, prevLoader, prevProjects := s.ts, s.loader, s.projects
+	prevStore := s.store
+	s.set = set
+	s.cwd = abs
+	s.root = sessionRoot
+	s.ts = toolSet
+	s.loader = resources.New(abs, set)
+	s.projects = project.NewStore(settings.GlobalDir())
+	s.mu.Unlock()
+
+	restore := func() {
+		s.mu.Lock()
+		s.cwd, s.set, s.root = prevCwd, prevSet, prevRoot
+		s.ts, s.loader, s.projects = prevTools, prevLoader, prevProjects
+		s.store = prevStore
+		s.mu.Unlock()
+	}
+
+	// The session lives in the new project, so its path follows the new cwd.
+	path, err := session.NewPath(sessionRoot, abs)
+	if err != nil {
+		restore()
+		return err
+	}
+	if err := s.buildAgent(path); err != nil {
+		restore()
+		return err
+	}
+	return nil
+}

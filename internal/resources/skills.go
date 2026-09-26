@@ -59,12 +59,12 @@ func (l *Loader) Skills() []Skill {
 	userSkillsDir := filepath.Join(settings.GlobalDir(), "skills")
 	userAgentsSkillsDir := filepath.Join(homeDir(), ".agents", "skills")
 
-	// Global: ~/.pi/agent/skills. Direct root .md files count as skills.
+	// Global: ~/.escape/skills. Direct root .md files count as skills.
 	l.scanSkillDir(userSkillsDir, true, "user", add)
 	// Global: ~/.agents/skills. Root .md files are ignored.
 	l.scanSkillDir(userAgentsSkillsDir, false, "user", add)
-	// Project: <cwd>/.pi/skills. Direct root .md files count as skills.
-	l.scanSkillDir(filepath.Join(absPath(l.cwd), ".pi", "skills"), true, "project", add)
+	// Project: <cwd>/.escape/skills. Direct root .md files count as skills.
+	l.scanSkillDir(filepath.Join(absPath(l.cwd), ".escape", "skills"), true, "project", add)
 	// Project: <dir>/.agents/skills walking up from cwd to the git root or
 	// the filesystem root. The user-level ~/.agents/skills directory is
 	// skipped (it was already loaded above).

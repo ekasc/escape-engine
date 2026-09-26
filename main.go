@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/diagnostics"
 	"github.com/ekasc/escape-engine/internal/memory"
 	"github.com/ekasc/escape-engine/internal/provider"
 	"github.com/ekasc/escape-engine/internal/resources"
@@ -50,6 +51,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdServe(args[1:], stdin, stdout, stderr)
 	case "rpc":
 		return cmdRPC(args[1:], stdin, stdout, stderr)
+	case "diagnostics":
+		return cmdDiagnostics(args[1:], stdout, stderr)
 	case "index-sessions":
 		return cmdIndexSessions(args, stdout, stderr)
 	case "prune-sessions":
@@ -106,7 +109,7 @@ Provider configuration (unless --fake):
   ESCAPE_MODEL      model id (default gpt-4o-mini)
 
 Sessions are stored as pi-compatible JSONL under ESCAPE_SESSIONS_DIR
-(default ~/.pi/agent/sessions), readable by the Escape shell unchanged.
+(default ~/.escape/sessions), readable by the Escape shell unchanged.
 `)
 }
 
@@ -294,21 +297,12 @@ func resolveLiveSessionPath(cwd, root string) (string, error) {
 	return info.Path, nil
 }
 
-func configuredSessionRoot(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return session.DefaultRoot()
-	}
-	if value == "~" || strings.HasPrefix(value, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			value = filepath.Join(home, strings.TrimPrefix(value, "~"))
-		}
-	}
-	abs, err := filepath.Abs(value)
-	if err == nil {
-		return abs
-	}
-	return filepath.Clean(value)
+func configuredSessionRoot(value string) string { return settings.SessionRoot(value) }
+
+// toolSetFor is the RPC server's tool builder. It is the same assembly a fresh
+// start uses, so switching project cannot drift from starting in that directory.
+func toolSetFor(cwd, sessionRoot string, set *settings.Settings) ([]tools.Tool, error) {
+	return toolsForCwd(cwd, memory.Open(sessionRoot, cwd), sessionRoot, &session.Control{}, func() string { return "" }, set.DefaultTools)
 }
 
 func setProviderSessionID(p provider.Provider, id string) {
@@ -1035,7 +1029,7 @@ func cmdRPC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "escape rpc:", err)
 		return 1
 	}
-	srv, err := rpc.NewPiServer(p, toolSet, set, cwd, sessionRoot, sessionPath, ctrl, stdout)
+	srv, err := rpc.NewPiServer(p, toolSet, set, cwd, sessionRoot, sessionPath, ctrl, stdout, toolSetFor)
 	if err != nil {
 		fmt.Fprintln(stderr, "escape rpc:", err)
 		return 1
@@ -1044,6 +1038,113 @@ func cmdRPC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "escape rpc:", err)
 		return 1
 	}
+	return 0
+}
+
+// --- diagnostics ---
+
+// cmdDiagnostics runs one real turn and reports where the time went.
+//
+// Every figure here is measured on a live provider request, not inferred. The
+// phases are separated because they fail differently: reading history is disk
+// and grows with the transcript, building the request is CPU and grows with the
+// conversation, and the provider wait is the network and the model. Only the
+// total tells you which one to go and fix.
+func cmdDiagnostics(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("diagnostics", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var cwd, sessionPath, prompt string
+	var cfg providerConfig
+	fs.StringVar(&cwd, "cwd", "", "working directory (default: current)")
+	fs.StringVar(&sessionPath, "session", "", "session file to measure against (default: new)")
+	fs.StringVar(&prompt, "prompt", "", "message to send (default: a short timing probe)")
+	commonProviderFlags(fs, &cfg)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if prompt == "" {
+		prompt = "Reply with exactly the word: ready"
+	}
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	set, err := settings.Load(cwd)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape diagnostics:", err)
+		return 1
+	}
+	if cfg.providerName == "" {
+		cfg.providerName = set.DefaultProvider
+	}
+	if cfg.model == "" {
+		cfg.model = set.DefaultModel
+	}
+	if cfg.thinkingLevel == "" {
+		cfg.thinkingLevel = set.DefaultThinkingLevel
+	}
+	// The real tool set is kept deliberately: its schemas are part of every
+	// request, so dropping them would measure something nobody actually sends.
+	toolSet, err := toolsForCwd(cwd, memory.Open(configuredSessionRoot(set.SessionDir), cwd),
+		configuredSessionRoot(set.SessionDir), &session.Control{}, func() string { return "" }, nil)
+	if err != nil {
+		toolSet = nil
+	}
+
+	p, err := cfg.provider()
+	if err != nil {
+		fmt.Fprintln(stderr, "escape diagnostics:", err)
+		return 1
+	}
+	root := configuredSessionRoot(set.SessionDir)
+	path, err := resolveSessionPathInRoot(sessionPath, cwd, root)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape diagnostics:", err)
+		return 1
+	}
+	store, err := session.Open(path, cwd)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape diagnostics:", err)
+		return 1
+	}
+	defer store.Close()
+	setProviderSessionID(p, store.ID())
+
+	ag := agent.New(agent.Options{Store: store, Provider: p, Tools: toolSet, Cwd: cwd, Model: cfg.model, Settings: set})
+	events := ag.Events()
+	defer ag.Unsubscribe(events)
+	settled := make(chan string, 1)
+	go func() {
+		for ev := range events {
+			switch ev.Event {
+			case agent.EventError:
+				fmt.Fprintln(stderr, "error:", ev.Message)
+			case agent.EventSettled:
+				settled <- ev.Reason
+				return
+			}
+		}
+	}()
+
+	if _, err := ag.Send(prompt); err != nil {
+		fmt.Fprintln(stderr, "escape diagnostics:", err)
+		return 1
+	}
+	<-settled
+
+	snap := ag.Diagnostics().Snapshot()
+	snap.Model = ag.Model()
+	snap.Provider = cfg.providerName
+	snap.Thinking = cfg.thinkingLevel
+	snap.SessionPath = store.Path()
+	snap.SessionEntries = ag.HistoryLen()
+	snap.Tools = ag.ToolCount()
+	if st, statErr := os.Stat(store.Path()); statErr == nil {
+		snap.SessionSize = st.Size()
+	}
+	if info, statErr := os.Stat(store.Path()); statErr == nil {
+		snap.SessionSize = info.Size()
+	}
+	diagnostics.WriteReport(stdout, snap)
 	return 0
 }
 

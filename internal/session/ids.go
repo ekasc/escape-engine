@@ -62,7 +62,7 @@ func NewPath(root, cwd string) (string, error) {
 	return filepath.Join(root, SlugForDir(abs), name), nil
 }
 
-// DefaultRoot returns the sessions root (~/.pi/agent/sessions), honoring
+// DefaultRoot returns the sessions root (~/.escape/sessions), honoring
 // ESCAPE_SESSIONS_DIR.
 func DefaultRoot() string {
 	if d := os.Getenv("ESCAPE_SESSIONS_DIR"); d != "" {
@@ -70,7 +70,7 @@ func DefaultRoot() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".pi/agent/sessions"
+		return ".escape/sessions"
 	}
-	return filepath.Join(home, ".pi", "agent", "sessions")
+	return filepath.Join(home, ".escape", "sessions")
 }

@@ -108,6 +108,9 @@ func TestTurnSimple(t *testing.T) {
 	}
 
 	// Session file must carry an assistant message with text + a title.
+	// Naming completes on its own schedule now, so the title is waited for
+	// rather than assumed to be there the moment the turn settles.
+	waitForTitle(t, store)
 	info, err := session.ReadInfo(store.Path())
 	if err != nil || info == nil {
 		t.Fatalf("info: %v", err)
@@ -141,7 +144,9 @@ func TestAutoNamingOnce(t *testing.T) {
 	}
 	waitSettle(t, ag, ReasonDone)
 
-	// Naming fires once, then two turns: 3 provider calls total.
+	// Naming fires once, then two turns: 3 provider calls total. The count is
+	// only final once naming has landed, which is no longer part of settling.
+	waitForTitle(t, store)
 	if fake.Calls != 3 {
 		t.Fatalf("calls = %d, want 3 (naming + 2 turns)", fake.Calls)
 	}
@@ -159,6 +164,23 @@ func TestAutoNamingOnce(t *testing.T) {
 	if len(titles) != 1 || titles[0] != "Fix the bug" {
 		t.Fatalf("titles = %v, want exactly [Fix the bug]", titles)
 	}
+}
+
+// waitForTitle polls for the session title. Naming runs alongside the turn
+// rather than before it, so a settled turn no longer implies a written title.
+func waitForTitle(t *testing.T, store *session.Store) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if entries, err := session.ReadAll(store.Path()); err == nil {
+			if name := session.LastName(entries); name != "" {
+				return name
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the title was never written")
+	return ""
 }
 
 func TestRecapPersistsAndKeepsTitle(t *testing.T) {
@@ -194,6 +216,7 @@ func TestRecapPersistsAndKeepsTitle(t *testing.T) {
 		t.Fatalf("recap line = %q", line)
 	}
 
+	waitForTitle(t, store)
 	entries, _ := session.ReadAll(store.Path())
 	// Title lookup (last non-empty session_info name) must still resolve.
 	if got := session.LastName(entries); got != "Fix the bug" {
@@ -542,6 +565,11 @@ func TestStopAfterPartialText(t *testing.T) {
 
 func TestProviderErrorRetry(t *testing.T) {
 	ag, _, fake := newTestAgent(t, nil)
+	// Naming runs alongside the turn, so the fake's shared call counter is read
+	// by two goroutines at once. Counting this turn's own attempts locally keeps
+	// the retry decision deterministic.
+	var mu sync.Mutex
+	attempts := 0
 	fake.Handler = func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
 		if IsNamingRequest(req) {
 			return []provider.Event{
@@ -549,7 +577,11 @@ func TestProviderErrorRetry(t *testing.T) {
 				{Kind: provider.EventDone, StopReason: "stop"},
 			}, nil
 		}
-		if fake.Calls <= 2 {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n <= 2 {
 			return nil, &provider.RetryableError{Status: 503, Msg: "boom"}
 		}
 		return []provider.Event{
@@ -562,8 +594,11 @@ func TestProviderErrorRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
-	if fake.Calls != 3 { // naming + one failed attempt + one retry
-		t.Fatalf("calls = %d, want 3", fake.Calls)
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 3 { // two failed attempts then a recovered one
+		t.Fatalf("attempts = %d, want 3", got)
 	}
 }
 
@@ -643,9 +678,15 @@ func TestSendBusy(t *testing.T) {
 func TestSteer(t *testing.T) {
 	var mu sync.Mutex
 	block := true
+	var lastUserText string
 	ag, _, fake := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
 		mu.Lock()
 		shouldBlock := block
+		for _, m := range req.Messages {
+			if m.Role == "user" {
+				lastUserText = m.Text
+			}
+		}
 		mu.Unlock()
 		if shouldBlock {
 			<-ctx.Done()
@@ -673,8 +714,17 @@ func TestSteer(t *testing.T) {
 	}
 	waitSettle(t, ag, ReasonDone)
 	_ = turnID
-	if fake.Calls != 2 { // naming (aborted) + the redirected turn
-		t.Fatalf("calls = %d, want 2", fake.Calls)
+	_ = fake
+
+	// The point of steering is that the call the model eventually sees carries
+	// the steering text, not the original message. Counting provider calls used
+	// to assert this, but it also encoded that session naming ran serially and
+	// was therefore the call a steer cancelled. Naming now runs alongside the
+	// turn, so the count is not the invariant; the redirected text is.
+	mu.Lock()
+	defer mu.Unlock()
+	if lastUserText != "redirected" {
+		t.Fatalf("last user text = %q, want %q", lastUserText, "redirected")
 	}
 }
 
@@ -734,6 +784,14 @@ func TestTurnKeepsHistory(t *testing.T) {
 	var seen []string
 	var mu sync.Mutex
 	ag, _, _ := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		// Naming runs alongside the first turn, so its request is not part of
+		// the conversation history this test is checking.
+		if IsNamingRequest(req) {
+			return []provider.Event{
+				{Kind: provider.EventText, Text: "a title"},
+				{Kind: provider.EventDone, StopReason: "stop"},
+			}, nil
+		}
 		mu.Lock()
 		var texts []string
 		for _, m := range req.Messages {
@@ -744,23 +802,29 @@ func TestTurnKeepsHistory(t *testing.T) {
 		return []provider.Event{{Kind: provider.EventDone, StopReason: "stop"}}, nil
 	})
 
-	ag.Send("first turn")
+	if _, err := ag.Send("first turn"); err != nil {
+		t.Fatal(err)
+	}
 	waitSettle(t, ag, ReasonDone)
-	ag.Send("second turn")
+	if _, err := ag.Send("second turn"); err != nil {
+		t.Fatal(err)
+	}
 	waitSettle(t, ag, ReasonDone)
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 3 { // naming + two turns
+	// Only the two turns: naming is handled above and its position relative to
+	// the turn is no longer fixed, so counting it would be a race.
+	if len(seen) != 2 {
 		t.Fatalf("seen = %d", len(seen))
 	}
 	// The first turn call must include the first user+assistant pair; the
 	// second turn call must retain it too.
-	if !strings.Contains(seen[1], "user:first turn") {
-		t.Errorf("first turn history lost: %s", seen[1])
+	if !strings.Contains(seen[0], "user:first turn") {
+		t.Errorf("first turn history lost: %s", seen[0])
 	}
-	if !strings.Contains(seen[2], "user:first turn") {
-		t.Errorf("second turn history lost: %s", seen[2])
+	if !strings.Contains(seen[1], "user:first turn") {
+		t.Errorf("second turn history lost: %s", seen[1])
 	}
 }
 

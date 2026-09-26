@@ -13,8 +13,8 @@ import (
 
 const templateDescriptionMax = 60
 
-// Templates returns all discovered prompt templates: ~/.pi/agent/prompts
-// (user) and <cwd>/.pi/prompts (project), both non-recursive, followed by
+// Templates returns all discovered prompt templates: ~/.escape/prompts
+// (user) and <cwd>/.escape/prompts (project), both non-recursive, followed by
 // explicit paths from settings (files, or directories collected recursively).
 // First-found wins on name collisions. The result is cached; create a new
 // Loader to re-discover.
@@ -33,7 +33,7 @@ func (l *Loader) Templates() []PromptTemplate {
 	}
 
 	scanTemplatesDir(filepath.Join(settings.GlobalDir(), "prompts"), "user", add)
-	scanTemplatesDir(filepath.Join(absPath(l.cwd), ".pi", "prompts"), "project", add)
+	scanTemplatesDir(filepath.Join(absPath(l.cwd), ".escape", "prompts"), "project", add)
 
 	for _, p := range l.s.Prompts {
 		path := resolveResourcePath(p, l.cwd)

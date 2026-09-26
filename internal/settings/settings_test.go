@@ -64,7 +64,7 @@ func TestMissingFilesAreNotErrors(t *testing.T) {
 	withHome(t)
 	cwd := t.TempDir()
 
-	// No ~/.pi/agent/settings.json, no <cwd>/.pi/settings.json.
+	// No ~/.escape/settings.json, no <cwd>/.escape/settings.json.
 	s, err := Load(cwd)
 	if err != nil {
 		t.Fatalf("Load with no settings files: %v", err)
@@ -78,11 +78,11 @@ func TestGlobalSettings(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
 
-	writeFile(t, filepath.Join(home, ".pi", "agent", "settings.json"), `{
+	writeFile(t, filepath.Join(home, ".escape", "settings.json"), `{
 		"defaultProvider": "anthropic",
 		"defaultModel": "claude-sonnet-4-20250514",
 		"compaction": { "enabled": false },
-		"sessionDir": "~/.pi/sessions"
+		"sessionDir": "~/.escape/sessions"
 	}`)
 
 	s, err := Load(cwd)
@@ -98,7 +98,7 @@ func TestGlobalSettings(t *testing.T) {
 	if s.Compaction.ReserveTokens != 16384 {
 		t.Errorf("unset compaction.reserveTokens should stay default, got %d", s.Compaction.ReserveTokens)
 	}
-	if s.SessionDir != "~/.pi/sessions" {
+	if s.SessionDir != "~/.escape/sessions" {
 		t.Errorf("sessionDir not applied: %q", s.SessionDir)
 	}
 	if s.Retry.MaxRetries != 3 {
@@ -109,7 +109,7 @@ func TestGlobalSettings(t *testing.T) {
 func TestSetGlobalProviderPreservesSettings(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
-	path := filepath.Join(home, ".pi", "agent", "settings.json")
+	path := filepath.Join(home, ".escape", "settings.json")
 	writeFile(t, path, `{"defaultModel":"configured-model","compaction":{"enabled":false}}`)
 
 	if err := SetGlobalProvider("opencode-zen"); err != nil {
@@ -129,7 +129,7 @@ func TestSetGlobalProviderCreatesSettings(t *testing.T) {
 	if err := SetGlobalProvider("codex"); err != nil {
 		t.Fatalf("SetGlobalProvider: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".pi", "agent", "settings.json"))
+	data, err := os.ReadFile(filepath.Join(home, ".escape", "settings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,14 +142,14 @@ func TestProjectOverridesGlobal(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
 
-	writeFile(t, filepath.Join(home, ".pi", "agent", "settings.json"), `{
+	writeFile(t, filepath.Join(home, ".escape", "settings.json"), `{
 		"defaultProvider": "anthropic",
 		"defaultModel": "claude-sonnet-4-20250514",
 		"defaultThinkingLevel": "high",
 		"defaultTools": ["bash", "edit"],
 		"steeringMode": "all"
 	}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{
+	writeFile(t, filepath.Join(cwd, ".escape", "settings.json"), `{
 		"defaultModel": "gpt-5.6",
 		"steeringMode": "one-at-a-time",
 		"defaultTools": ["bash"],
@@ -184,12 +184,12 @@ func TestNestedMergeProjectPartial(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
 
-	writeFile(t, filepath.Join(home, ".pi", "agent", "settings.json"), `{
+	writeFile(t, filepath.Join(home, ".escape", "settings.json"), `{
 		"compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
 		"retry": { "enabled": true, "maxRetries": 3, "baseDelayMs": 2000 }
 	}`)
 	// Project only sets one nested field per group; the rest must survive.
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{
+	writeFile(t, filepath.Join(cwd, ".escape", "settings.json"), `{
 		"compaction": { "reserveTokens": 8192 },
 		"retry": { "maxRetries": 1 }
 	}`)
@@ -210,10 +210,10 @@ func TestProjectOnlySettings(t *testing.T) {
 	withHome(t)
 	cwd := t.TempDir()
 
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{
+	writeFile(t, filepath.Join(cwd, ".escape", "settings.json"), `{
 		"defaultModel": "deepseek-v4-flash",
 		"defaultProjectTrust": "always",
-		"skills": ["~/.pi/agent/skills"],
+		"skills": ["~/.escape/skills"],
 		"enableSkillCommands": false
 	}`)
 
@@ -227,7 +227,7 @@ func TestProjectOnlySettings(t *testing.T) {
 	if s.DefaultProjectTrust != "always" {
 		t.Errorf("project defaultProjectTrust not applied: %q", s.DefaultProjectTrust)
 	}
-	if len(s.Skills) != 1 || s.Skills[0] != "~/.pi/agent/skills" {
+	if len(s.Skills) != 1 || s.Skills[0] != "~/.escape/skills" {
 		t.Errorf("project skills not applied: %v", s.Skills)
 	}
 	if s.EnableSkillCommands {
@@ -238,7 +238,7 @@ func TestProjectOnlySettings(t *testing.T) {
 func TestEmptyProjectFileIgnored(t *testing.T) {
 	withHome(t)
 	cwd := t.TempDir()
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), "   \n  ")
+	writeFile(t, filepath.Join(cwd, ".escape", "settings.json"), "   \n  ")
 
 	s, err := Load(cwd)
 	if err != nil {
@@ -253,13 +253,13 @@ func TestMalformedJSONErrors(t *testing.T) {
 	home := withHome(t)
 	cwd := t.TempDir()
 
-	writeFile(t, filepath.Join(home, ".pi", "agent", "settings.json"), `{"defaultProvider": `)
+	writeFile(t, filepath.Join(home, ".escape", "settings.json"), `{"defaultProvider": `)
 	if _, err := Load(cwd); err == nil {
 		t.Error("expected error for malformed global settings, got nil")
 	}
 
-	writeFile(t, filepath.Join(home, ".pi", "agent", "settings.json"), `{}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `not json`)
+	writeFile(t, filepath.Join(home, ".escape", "settings.json"), `{}`)
+	writeFile(t, filepath.Join(cwd, ".escape", "settings.json"), `not json`)
 	if _, err := Load(cwd); err == nil {
 		t.Error("expected error for malformed project settings, got nil")
 	}
@@ -271,11 +271,11 @@ func TestFieldCaseInsensitiveMatching(t *testing.T) {
 
 	// Non-canonical casing must still match (encoding/json is
 	// case-insensitive; the merge lowercases keys).
-	writeFile(t, filepath.Join(home, ".pi", "agent", "settings.json"), `{
+	writeFile(t, filepath.Join(home, ".escape", "settings.json"), `{
 		"DefaultModel": "claude-sonnet-4-20250514",
 		"Compaction": { "Enabled": false, "KeepRecentTokens": 30000 }
 	}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{
+	writeFile(t, filepath.Join(cwd, ".escape", "settings.json"), `{
 		"COMPACTION": { "RESERVETOKENS": 4096 }
 	}`)
 
@@ -294,7 +294,7 @@ func TestFieldCaseInsensitiveMatching(t *testing.T) {
 func TestGlobalDir(t *testing.T) {
 	home := withHome(t)
 	got := GlobalDir()
-	want := filepath.Join(home, ".pi", "agent")
+	want := filepath.Join(home, ".escape")
 	if got != want {
 		t.Errorf("GlobalDir() = %q, want %q", got, want)
 	}
@@ -310,22 +310,22 @@ func TestProjectDir(t *testing.T) {
 		}
 	}
 
-	// No .pi anywhere: fall back to <cwd>/.pi.
+	// No .escape anywhere: fall back to <cwd>/.escape.
 	cwd := filepath.Join(base, "a", "b")
 	mkdir(cwd)
-	if got, want := ProjectDir(cwd), filepath.Join(cwd, ".pi"); got != want {
+	if got, want := ProjectDir(cwd), filepath.Join(cwd, ".escape"); got != want {
 		t.Errorf("ProjectDir(%q) = %q, want %q", cwd, got, want)
 	}
 
-	// Nearest .pi wins.
-	piA := filepath.Join(base, "a", ".pi")
+	// Nearest .escape wins.
+	piA := filepath.Join(base, "a", ".escape")
 	mkdir(piA)
 	if got, want := ProjectDir(cwd), piA; got != want {
 		t.Errorf("ProjectDir(%q) = %q, want %q", cwd, got, want)
 	}
 
-	// Walk-up finds an ancestor .pi.
-	piBase := filepath.Join(base, ".pi")
+	// Walk-up finds an ancestor .escape.
+	piBase := filepath.Join(base, ".escape")
 	mkdir(piBase)
 	deep := filepath.Join(base, "x", "y", "z")
 	mkdir(deep)
@@ -334,7 +334,7 @@ func TestProjectDir(t *testing.T) {
 	}
 
 	// The walk stops at the git root (here a .git file, as in worktrees): a
-	// .pi above it must not win.
+	// .escape above it must not win.
 	gitRoot := filepath.Join(base, "repo")
 	gitCwd := filepath.Join(gitRoot, "src", "pkg")
 	mkdir(gitRoot)
@@ -342,13 +342,13 @@ func TestProjectDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(gitRoot, ".git"), []byte("gitdir: ../.git/worktrees/repo"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// base/.pi (piBase) sits above the git root; the walk must not reach it.
-	if got, want := ProjectDir(gitCwd), filepath.Join(gitCwd, ".pi"); got != want {
+	// base/.escape (piBase) sits above the git root; the walk must not reach it.
+	if got, want := ProjectDir(gitCwd), filepath.Join(gitCwd, ".escape"); got != want {
 		t.Errorf("ProjectDir(%q) = %q, want %q (walk must stop at git root)", gitCwd, got, want)
 	}
 
-	// A .pi at the git root itself is still found.
-	piGit := filepath.Join(gitRoot, ".pi")
+	// An .escape at the git root itself is still found.
+	piGit := filepath.Join(gitRoot, ".escape")
 	mkdir(piGit)
 	if got, want := ProjectDir(gitCwd), piGit; got != want {
 		t.Errorf("ProjectDir(%q) = %q, want %q", gitCwd, got, want)
@@ -362,7 +362,7 @@ func TestLoadUsesCwdProjectFile(t *testing.T) {
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"defaultModel": "minimax-m3"}`)
+	writeFile(t, filepath.Join(cwd, ".escape", "settings.json"), `{"defaultModel": "minimax-m3"}`)
 
 	s, err := Load(cwd)
 	if err != nil {

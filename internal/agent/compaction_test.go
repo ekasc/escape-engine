@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // summarizeHandler is a fake provider handler that returns a fixed structured

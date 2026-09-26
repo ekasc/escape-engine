@@ -1,8 +1,8 @@
 package agent
 
 import (
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // entryCache remembers how much of a session file has already been turned into

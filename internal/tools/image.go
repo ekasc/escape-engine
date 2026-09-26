@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ekasc/escape/engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/provider"
 )
 
 // ImageOutputPrefix marks a read result whose Output is an image data URI

@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/ekasc/escape/engine/internal/resources"
+import "github.com/ekasc/escape-engine/internal/resources"
 
 // buildSystemPrompt assembles the full system prompt for a session: the base
 // coding-agent prompt, then SYSTEM.md (replace) / APPEND_SYSTEM.md (append),

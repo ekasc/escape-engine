@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
-	"github.com/ekasc/escape/engine/internal/settings"
-	"github.com/ekasc/escape/engine/internal/tools"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/tools"
 )
 
 // ErrBusy is returned when Send is called while a turn is running.

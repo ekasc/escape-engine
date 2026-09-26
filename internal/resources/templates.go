@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/settings"
 )
 
 const templateDescriptionMax = 60

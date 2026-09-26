@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/ekasc/escape/engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/provider"
 )
 
 type snapArchive struct {

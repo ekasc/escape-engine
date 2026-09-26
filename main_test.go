@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/memory"
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/memory"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 func TestLatestSessionForCwd(t *testing.T) {

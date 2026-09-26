@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // CompactionResult is the outcome of a compaction pass.

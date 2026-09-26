@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // writeSession writes a real session file through the store, so the fixture

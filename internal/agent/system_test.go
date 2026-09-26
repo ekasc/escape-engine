@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ekasc/escape/engine/internal/memory"
+	"github.com/ekasc/escape-engine/internal/memory"
 )
 
 func TestSystemPromptIncludesMemorySnapshot(t *testing.T) {

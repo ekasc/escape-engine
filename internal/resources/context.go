@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/settings"
 )
 
 // contextFileCandidates are the per-directory context file names in

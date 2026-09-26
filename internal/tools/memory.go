@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ekasc/escape/engine/internal/memory"
+	"github.com/ekasc/escape-engine/internal/memory"
 )
 
 // Memory lets the agent keep the few facts that must outlive this session:

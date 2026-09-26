@@ -1,4 +1,4 @@
-module github.com/ekasc/escape/engine
+module github.com/ekasc/escape-engine
 
 go 1.26.0
 

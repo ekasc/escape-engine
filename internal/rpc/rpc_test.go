@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/agent"
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
-	"github.com/ekasc/escape/engine/internal/tools"
+	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/tools"
 )
 
 // newTestServer wires a fake-provider agent behind an rpc.Server over pipes.

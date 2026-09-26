@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/settings"
 )
 
 const (

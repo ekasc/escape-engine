@@ -8,9 +8,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/ekasc/escape/engine/internal/memory"
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/memory"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // Result is what a tool returns to the agent loop.

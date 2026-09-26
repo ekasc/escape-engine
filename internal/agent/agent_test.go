@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
-	"github.com/ekasc/escape/engine/internal/tools"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/tools"
 )
 
 func newTestAgent(t *testing.T, handler func(ctx context.Context, req provider.Request) ([]provider.Event, error)) (*Agent, *session.Store, *provider.Fake) {

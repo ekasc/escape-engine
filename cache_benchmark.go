@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
-	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/settings"
 )
 
 const maxCacheBenchmarkRuns = 20

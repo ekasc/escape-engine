@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
-	"github.com/ekasc/escape/engine/internal/settings"
-	"github.com/ekasc/escape/engine/internal/tools"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/tools"
 )
 
 // fakePiHandler is the canned provider used by the pi protocol tests: every

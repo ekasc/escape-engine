@@ -3,8 +3,8 @@ package agent
 import (
 	"testing"
 
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // sessionCapturingProvider records the session ID bound by the agent.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // Sessions lets the agent find and resume earlier work in this project instead

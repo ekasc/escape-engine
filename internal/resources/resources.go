@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/settings"
 )
 
 // Skill is a discovered agent skill: a directory containing SKILL.md, or a

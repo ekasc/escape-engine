@@ -18,7 +18,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // MaxChars bounds the entry text. ~800 tokens, which is small enough that the

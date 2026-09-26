@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/agent"
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 // JSON-RPC error codes.

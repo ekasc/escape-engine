@@ -17,10 +17,10 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/ekasc/escape/engine/internal/agent"
-	"github.com/ekasc/escape/engine/internal/resources"
-	"github.com/ekasc/escape/engine/internal/session"
-	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/resources"
+	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/settings"
 )
 
 const tuiCommandAreaHeight = 5

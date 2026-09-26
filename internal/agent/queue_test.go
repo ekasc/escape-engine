@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/provider"
 )
 
 // recordHandler returns a handler that records the last user text of each

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/settings"
 )
 
 func TestNormalizeLoginProvider(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/session"
 )
 
 func newCacheFixture(t *testing.T) (*session.Store, string) {

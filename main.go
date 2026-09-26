@@ -18,14 +18,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ekasc/escape/engine/internal/agent"
-	"github.com/ekasc/escape/engine/internal/memory"
-	"github.com/ekasc/escape/engine/internal/provider"
-	"github.com/ekasc/escape/engine/internal/resources"
-	"github.com/ekasc/escape/engine/internal/rpc"
-	"github.com/ekasc/escape/engine/internal/session"
-	"github.com/ekasc/escape/engine/internal/settings"
-	"github.com/ekasc/escape/engine/internal/tools"
+	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/memory"
+	"github.com/ekasc/escape-engine/internal/provider"
+	"github.com/ekasc/escape-engine/internal/resources"
+	"github.com/ekasc/escape-engine/internal/rpc"
+	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/settings"
+	"github.com/ekasc/escape-engine/internal/tools"
 )
 
 const version = "0.1.0"

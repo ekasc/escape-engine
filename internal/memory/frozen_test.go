@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ekasc/escape/engine/internal/memory"
+	"github.com/ekasc/escape-engine/internal/memory"
 )
 
 // The contract that makes durable memory useful: a write during a session is on

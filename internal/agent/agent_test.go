@@ -3,15 +3,16 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ekasc/pi-go/internal/provider"
-	"github.com/ekasc/pi-go/internal/session"
-	"github.com/ekasc/pi-go/internal/tools"
+	"github.com/ekasc/escape/engine/internal/provider"
+	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape/engine/internal/tools"
 )
 
 func newTestAgent(t *testing.T, handler func(ctx context.Context, req provider.Request) ([]provider.Event, error)) (*Agent, *session.Store, *provider.Fake) {
@@ -26,7 +27,7 @@ func newTestAgent(t *testing.T, handler func(ctx context.Context, req provider.R
 	ag := New(Options{
 		Store:    store,
 		Provider: fake,
-		Tools:    tools.Default(dir),
+		Tools:    tools.Default(tools.Deps{Cwd: dir}),
 		Cwd:      dir,
 		Model:    "fake-model",
 	})
@@ -301,7 +302,7 @@ func TestTurnToolUse(t *testing.T) {
 		t.Fatalf("roles = %v, want %v", roles, want)
 	}
 
-	// The tool result must be persisted with toolCallId (Babylon contract).
+	// The tool result must be persisted with toolCallId (the desktop shell contract).
 	var tr *session.Message
 	for _, e := range entries {
 		if e.Message != nil && e.Message.Role == session.RoleToolResult {
@@ -326,6 +327,166 @@ func TestTurnToolUse(t *testing.T) {
 	}
 	if asst == nil {
 		t.Errorf("no toolUse assistant entry in %+v", entries)
+	}
+}
+
+func TestApprovalDeniesSensitiveTool(t *testing.T) {
+	ag, store, _ := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		if IsNamingRequest(req) {
+			return []provider.Event{{Kind: provider.EventText, Text: "Approval test"}, {Kind: provider.EventDone, StopReason: "stop"}}, nil
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == "user" {
+			return []provider.Event{
+				{Kind: provider.EventToolCall, ToolCall: provider.ToolCall{ID: "write_approval", Name: "bash", Args: map[string]any{"command": "touch created-by-agent"}}},
+				{Kind: provider.EventDone, StopReason: "tool_calls"},
+			}, nil
+		}
+		return []provider.Event{{Kind: provider.EventDone, StopReason: "stop"}}, nil
+	})
+	ag.opts.ApprovalMode = ApprovalAsk
+
+	events := ag.Events()
+	defer ag.Unsubscribe(events)
+	if _, err := ag.Send("create a file"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(2 * time.Second)
+	approved := false
+	settled := false
+	for !settled {
+		select {
+		case ev := <-events:
+			switch ev.Event {
+			case EventApprovalRequested:
+				if ev.ToolCallID != "write_approval" || ev.Name != "bash" {
+					t.Fatalf("approval event = %+v", ev)
+				}
+				if err := ag.AnswerApproval(ev.ToolCallID, false); err != nil {
+					t.Fatal(err)
+				}
+				approved = true
+			case EventSettled:
+				settled = true
+			}
+		case <-deadline:
+			t.Fatal("approval turn did not settle")
+		}
+	}
+	if !approved {
+		t.Fatal("approval was not requested")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(store.Path()), "created-by-agent")); !os.IsNotExist(err) {
+		t.Fatalf("sensitive tool ran despite denial: %v", err)
+	}
+	entries, _ := session.ReadAll(store.Path())
+	found := false
+	for _, entry := range entries {
+		if entry.Message != nil && entry.Message.ToolCallID == "write_approval" && entry.Message.Text(false) == "tool execution denied by user" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("denial was not persisted as a tool result")
+	}
+}
+
+func TestRenameSession(t *testing.T) {
+	ag, store, _ := newTestAgent(t, nil)
+	if err := ag.Rename("Daily driver"); err != nil {
+		t.Fatal(err)
+	}
+	name, err := session.Name(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "Daily driver" {
+		t.Fatalf("session name = %q", name)
+	}
+}
+
+func TestSetApprovalMode(t *testing.T) {
+	ag, _, _ := newTestAgent(t, nil)
+	if err := ag.SetApprovalMode(ApprovalAsk); err != nil {
+		t.Fatal(err)
+	}
+	if got := ag.State().ApprovalMode; got != ApprovalAsk {
+		t.Fatalf("approval mode = %q", got)
+	}
+	if err := ag.SetApprovalMode("sometimes"); err == nil {
+		t.Fatal("invalid approval mode was accepted")
+	}
+}
+
+func TestSwitchStore(t *testing.T) {
+	ag, _, _ := newTestAgent(t, nil)
+	dir := t.TempDir()
+	next, err := session.Open(filepath.Join(dir, "next.jsonl"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	if err := ag.SwitchStore(next); err != nil {
+		t.Fatal(err)
+	}
+	if got := ag.opts.Store.Path(); got != next.Path() {
+		t.Fatalf("active store = %q, want %q", got, next.Path())
+	}
+}
+
+func TestQuestionPausesAndResumes(t *testing.T) {
+	ag, store, _ := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
+		if IsNamingRequest(req) {
+			return []provider.Event{{Kind: provider.EventText, Text: "Question test"}, {Kind: provider.EventDone, StopReason: "stop"}}, nil
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == "user" {
+			return []provider.Event{
+				{Kind: provider.EventToolCall, ToolCall: provider.ToolCall{ID: "q1", Name: "question", Args: map[string]any{"question": "Which environment?", "choices": []string{"dev", "prod"}}}},
+				{Kind: provider.EventDone, StopReason: "tool_calls"},
+			}, nil
+		}
+		if last.Role == "tool" {
+			return []provider.Event{{Kind: provider.EventText, Text: "Using " + last.Text}, {Kind: provider.EventDone, StopReason: "stop"}}, nil
+		}
+		return nil, errors.New("unexpected call")
+	})
+
+	events := ag.Events()
+	defer ag.Unsubscribe(events)
+	if _, err := ag.Send("deploy it"); err != nil {
+		t.Fatal(err)
+	}
+	answer := make(chan struct{})
+	go func() {
+		for ev := range events {
+			if ev.Event == EventQuestionRequested {
+				if ev.Question != "Which environment?" || ev.ToolCallID != "q1" {
+					t.Errorf("question event = %+v", ev)
+				}
+				if err := ag.AnswerQuestion("q1", "dev"); err != nil {
+					t.Errorf("answer question: %v", err)
+				}
+				close(answer)
+				return
+			}
+		}
+	}()
+	select {
+	case <-answer:
+	case <-time.After(2 * time.Second):
+		t.Fatal("question was not requested")
+	}
+	waitSettle(t, ag, ReasonDone)
+	entries, _ := session.ReadAll(store.Path())
+	found := false
+	for _, e := range entries {
+		if e.Message != nil && e.Message.ToolCallID == "q1" && e.Message.Text(false) == "dev" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("question answer was not persisted")
 	}
 }
 
@@ -561,7 +722,7 @@ func TestEventStreamOrder(t *testing.T) {
 	<-done
 
 	got := strings.Join(order, ",")
-	if !strings.HasPrefix(got, "turn_started,") || !strings.Contains(got, "message_start,") || !strings.Contains(got, "message_delta,") || !strings.Contains(got, "message_end,") || !strings.HasSuffix(got, ",agent_settled") {
+	if !strings.HasPrefix(got, "agent_start,turn_started,") || !strings.Contains(got, "message_start,") || !strings.Contains(got, "message_delta,") || !strings.Contains(got, "message_end,") || !strings.HasSuffix(got, ",agent_settled") {
 		t.Fatalf("event order = %s", got)
 	}
 	if !strings.Contains(got, "agent_settled") {
@@ -600,5 +761,26 @@ func TestTurnKeepsHistory(t *testing.T) {
 	}
 	if !strings.Contains(seen[2], "user:first turn") {
 		t.Errorf("second turn history lost: %s", seen[2])
+	}
+}
+
+func TestStripThinking(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Recap: <think>I will summarize now</think> fixed the bug.", "Recap:  fixed the bug."}, // cleanRecap collapses the gap
+		{"<think>only thinking</think>", ""},
+		{"<antml:thinking>t</antml:thinking>Title", "Title"},
+		{"no tags here", "no tags here"},
+	}
+	for _, c := range cases {
+		if got := stripThinking(c.in); got != c.want {
+			t.Errorf("stripThinking(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestCleanRecapStripsThinking(t *testing.T) {
+	got := cleanRecap("<think>The user wants a summary.</think> Recap: rewrote the provider layer.")
+	if got != "Recap: rewrote the provider layer." {
+		t.Fatalf("cleanRecap = %q", got)
 	}
 }

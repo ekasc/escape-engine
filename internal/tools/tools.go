@@ -1,5 +1,5 @@
 // Package tools implements the v1 tool set: bash, file read/write, patch
-// edit, grep, glob.
+// edit, grep, glob, web search, clarification, and durable project memory.
 package tools
 
 import (
@@ -8,7 +8,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/ekasc/pi-go/internal/provider"
+	"github.com/ekasc/escape/engine/internal/memory"
+	"github.com/ekasc/escape/engine/internal/provider"
+	"github.com/ekasc/escape/engine/internal/session"
 )
 
 // Result is what a tool returns to the agent loop.
@@ -19,10 +21,11 @@ type Result struct {
 
 // Tool is a callable the model can invoke.
 type Tool struct {
-	Name        string
-	Description string
-	Parameters  map[string]any // JSON schema
-	Run         func(ctx context.Context, args map[string]any) Result
+	Name         string
+	Description  string
+	Parameters   map[string]any // JSON schema
+	ParallelSafe bool           `json:"parallelSafe,omitempty"`
+	Run          func(ctx context.Context, args map[string]any) Result
 }
 
 // Registry is a concurrency-safe tool lookup.
@@ -75,14 +78,41 @@ func (r *Registry) Specs() []provider.ToolSpec {
 }
 
 // Default returns the v1 tool set for a workspace.
-func Default(cwd string) []Tool {
+// Deps are the engine-level collaborators a tool set needs. They are passed as
+// a struct because the set grows: a positional list would be four unrelated
+// arguments by the third one.
+type Deps struct {
+	// Cwd is the working directory for filesystem and shell tools.
+	Cwd string
+	// Memory is this project's durable store. Nil disables the memory tool
+	// rather than failing the session.
+	Memory *memory.Store
+	// SessionRoot and Cwd together scope session search to one project.
+	SessionRoot string
+	// CurrentSession reports the live session path. It is a function because
+	// the session changes underneath a long-lived tool set.
+	CurrentSession func() string
+	// Control carries live session state between the tool set and the server.
+	Control *session.Control
+}
+
+// Default is the built-in tool set.
+func Default(d Deps) []Tool {
+	current := d.CurrentSession
+	if current == nil {
+		current = func() string { return "" }
+	}
 	return []Tool{
-		Bash(cwd),
-		Read(cwd),
-		Write(cwd),
-		Edit(cwd),
-		Grep(cwd),
-		Glob(cwd),
+		Bash(d.Cwd),
+		Read(d.Cwd),
+		Write(d.Cwd),
+		Edit(d.Cwd),
+		Question(),
+		WebSearch(),
+		Grep(d.Cwd),
+		Glob(d.Cwd),
+		Memory(d.Memory),
+		Sessions(d.SessionRoot, d.Cwd, current, d.Control),
 	}
 }
 

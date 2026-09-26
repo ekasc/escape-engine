@@ -17,7 +17,10 @@ type OpenAI struct {
 	BaseURL string // e.g. https://api.openai.com/v1
 	APIKey  string
 	Model   string
-	HTTP    *http.Client
+	// ReasoningEffort, when non-empty, is sent as `reasoning_effort`
+	// (OpenAI-compatible reasoning level: minimal/low/medium/high/xhigh).
+	ReasoningEffort string
+	HTTP            *http.Client
 
 	// Logf, when set, receives non-prompt diagnostic lines (never prompt or
 	// tool payloads — mirroring pi's rule about not mirroring prompts).
@@ -40,6 +43,9 @@ func (c *OpenAI) logf(format string, args ...any) {
 	}
 }
 
+// SetReasoningEffort updates the reasoning effort for subsequent calls.
+func (c *OpenAI) SetReasoningEffort(level string) { c.ReasoningEffort = level }
+
 // Stream implements Provider.
 func (c *OpenAI) Stream(ctx context.Context, req Request) (Stream, error) {
 	model := c.Model
@@ -47,51 +53,66 @@ func (c *OpenAI) Stream(ctx context.Context, req Request) (Stream, error) {
 		model = req.Model
 	}
 
-	body := map[string]any{
-		"model":    model,
-		"messages": wireMessages(req.Messages),
-		"stream":   true,
-	}
-	if req.MaxTokens > 0 {
-		body["max_tokens"] = req.MaxTokens
-	}
-	if len(req.Tools) > 0 {
-		body["tools"] = wireTools(req.Tools)
-	}
-
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
-	url := c.BaseURL + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	c.logf("provider: POST %s model=%s messages=%d tools=%d", url, model, len(req.Messages), len(req.Tools))
-	resp, err := c.HTTP.Do(httpReq)
-	if err != nil {
-		return nil, &RetryableError{Msg: fmt.Sprintf("transport error: %v", err)}
-	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		status := resp.StatusCode
-		if status == http.StatusTooManyRequests || status >= 500 {
-			return nil, &RetryableError{Status: status, Msg: fmt.Sprintf("provider status %d: %s", status, strings.TrimSpace(string(msg)))}
+	effort := c.ReasoningEffort
+	for {
+		body := map[string]any{
+			"model":          model,
+			"messages":       wireMessages(req.Messages),
+			"stream":         true,
+			"stream_options": map[string]any{"include_usage": true},
 		}
-		return nil, fmt.Errorf("provider status %d: %s", status, strings.TrimSpace(string(msg)))
-	}
+		if req.MaxTokens > 0 {
+			body["max_tokens"] = req.MaxTokens
+		}
+		if len(req.Tools) > 0 {
+			body["tools"] = wireTools(req.Tools)
+		}
+		if effort != "" && effort != "off" {
+			body["reasoning_effort"] = effort
+		}
 
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	return &sseStream{sc: sc, resp: resp, logf: c.logf}, nil
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+
+		url := c.BaseURL + "/chat/completions"
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if c.APIKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+		}
+
+		c.logf("provider: POST %s model=%s messages=%d tools=%d effort=%q", url, model, len(req.Messages), len(req.Tools), effort)
+		resp, err := c.HTTP.Do(httpReq)
+		if err != nil {
+			return nil, &RetryableError{Msg: fmt.Sprintf("transport error: %v", err)}
+		}
+		if resp.StatusCode != http.StatusOK {
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			status := resp.StatusCode
+			// Model rejects the reasoning level → fall back to the lowest
+			// supported effort instead of failing the turn.
+			if isReasoningRejection(status, msg) && effort != "" {
+				next := nextLowerEffort(effort)
+				c.logf("provider: model rejected reasoning_effort=%q (%s), retrying with %q", effort, strings.TrimSpace(string(msg)), next)
+				effort = next
+				continue
+			}
+			if status == http.StatusTooManyRequests || status >= 500 {
+				return nil, &RetryableError{Status: status, Msg: fmt.Sprintf("provider status %d: %s", status, strings.TrimSpace(string(msg)))}
+			}
+			return nil, fmt.Errorf("provider status %d: %s", status, strings.TrimSpace(string(msg)))
+		}
+
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 64*1024), 32*1024*1024)
+		return &sseStream{sc: sc, resp: resp, logf: c.logf}, nil
+	}
 }
 
 // --- wire encoding ---
@@ -124,12 +145,39 @@ func wireMessages(msgs []Message) []map[string]any {
 			}
 			out = append(out, w)
 		case "tool":
-			out = append(out, map[string]any{"role": "tool", "tool_call_id": m.ToolCallID, "content": m.Text})
+			out = append(out, map[string]any{"role": "tool", "tool_call_id": m.ToolCallID, "content": wireContent(m)})
 		default: // "user", "system"
-			out = append(out, map[string]any{"role": m.Role, "content": m.Text})
+			out = append(out, map[string]any{"role": m.Role, "content": wireContent(m)})
 		}
 	}
 	return out
+}
+
+// wireContent renders a message's content as a plain string, or — when the
+// message carries an image — as an array of content parts:
+// [{"type":"text","text":...}, {"type":"image_url","image_url":{"url":"data:<mime>;base64,..."}}]
+// (OpenAI multimodal format).
+func wireContent(m Message) any {
+	images := m.Images
+	if m.Image != nil {
+		images = append([]*Image{m.Image}, images...)
+	}
+	if len(images) == 0 {
+		return m.Text
+	}
+	parts := make([]map[string]any, 0, len(images)+1)
+	if m.Text != "" {
+		parts = append(parts, map[string]any{"type": "text", "text": m.Text})
+	}
+	for _, image := range images {
+		if image != nil {
+			parts = append(parts, map[string]any{
+				"type":      "image_url",
+				"image_url": map[string]any{"url": image.DataURI()},
+			})
+		}
+	}
+	return parts
 }
 
 func wireTools(tools []ToolSpec) []map[string]any {
@@ -184,9 +232,12 @@ type streamChunk struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -277,6 +328,10 @@ func (s *sseStream) parseChunk(data []byte) Event {
 			Input:       ch.Usage.PromptTokens,
 			Output:      ch.Usage.CompletionTokens,
 			TotalTokens: ch.Usage.TotalTokens,
+		}
+		if ch.Usage.PromptTokensDetails != nil {
+			s.usage.CacheRead = ch.Usage.PromptTokensDetails.CachedTokens
+			s.usage.CacheReadAvailable = true
 		}
 	}
 

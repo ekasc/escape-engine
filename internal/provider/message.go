@@ -6,7 +6,10 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"strconv"
+	"strings"
 )
 
 // ToolCall is a model-requested function invocation.
@@ -14,6 +17,43 @@ type ToolCall struct {
 	ID   string
 	Name string
 	Args map[string]any
+}
+
+// Image is one image attachment in a message. OpenAI-compatible providers
+// send it as an image_url content part; the ChatGPT provider (see chatgpt.go)
+// ignores it — its wireInput only serializes Text, so image messages fall
+// back to the text-only representation and still work.
+type Image struct {
+	MimeType string // e.g. "image/png"
+	Data     []byte // raw image bytes
+}
+
+// DataURI renders the image as a base64 data URI for the wire:
+// "data:<mime>;base64,<payload>".
+func (im *Image) DataURI() string {
+	return "data:" + im.MimeType + ";base64," + base64.StdEncoding.EncodeToString(im.Data)
+}
+
+// ParseDataURI decodes a base64 data URI ("data:<mime>;base64,<payload>") into
+// an Image, e.g. from a read tool result.
+func ParseDataURI(uri string) (*Image, error) {
+	rest, ok := strings.CutPrefix(uri, "data:")
+	if !ok {
+		return nil, fmt.Errorf("not a data URI")
+	}
+	meta, payload, ok := strings.Cut(rest, ",")
+	if !ok {
+		return nil, fmt.Errorf("malformed data URI")
+	}
+	mime, _, _ := strings.Cut(meta, ";")
+	if mime == "" {
+		return nil, fmt.Errorf("data URI missing MIME type")
+	}
+	data, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("data URI: %w", err)
+	}
+	return &Image{MimeType: mime, Data: data}, nil
 }
 
 // Message is one chat message in provider (wire) terms.
@@ -24,6 +64,10 @@ type Message struct {
 	ToolCallID   string // for role "tool"
 	ToolCallName string // for role "tool"
 	ToolCalls    []ToolCall
+	// Image, when set, attaches an image to this message (typically role
+	// "user" or "tool", e.g. the result of reading an image file).
+	Image  *Image
+	Images []*Image
 }
 
 // ToolSpec declares one tool to the model.
@@ -43,11 +87,21 @@ type Request struct {
 
 // Usage mirrors pi's token accounting.
 type Usage struct {
-	Input       int
-	Output      int
-	CacheRead   int
-	CacheWrite  int
-	TotalTokens int
+	Input              int
+	Output             int
+	CacheRead          int
+	CacheWrite         int
+	TotalTokens        int
+	CacheReadAvailable bool
+}
+
+// CacheHitRate returns cached prompt tokens divided by total prompt tokens.
+// The boolean is false when the provider did not report cache accounting.
+func CacheHitRate(usage Usage) (float64, bool) {
+	if !usage.CacheReadAvailable || usage.Input <= 0 {
+		return 0, false
+	}
+	return float64(usage.CacheRead) / float64(usage.Input), true
 }
 
 // EventKind discriminates stream events.

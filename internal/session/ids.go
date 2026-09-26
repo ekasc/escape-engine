@@ -63,9 +63,9 @@ func NewPath(root, cwd string) (string, error) {
 }
 
 // DefaultRoot returns the sessions root (~/.pi/agent/sessions), honoring
-// AGENT_GO_SESSIONS_DIR.
+// ESCAPE_SESSIONS_DIR.
 func DefaultRoot() string {
-	if d := os.Getenv("AGENT_GO_SESSIONS_DIR"); d != "" {
+	if d := os.Getenv("ESCAPE_SESSIONS_DIR"); d != "" {
 		return d
 	}
 	home, err := os.UserHomeDir()

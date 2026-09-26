@@ -14,7 +14,7 @@ import (
 var ErrEmpty = errors.New("session file has no header")
 
 // Store is an append-only writer for one session file. Writes are full-line
-// appends so a reader (Babylon) never sees a torn line in the middle.
+// appends so a reader (the desktop shell) never sees a torn line in the middle.
 type Store struct {
 	path string
 	f    *os.File

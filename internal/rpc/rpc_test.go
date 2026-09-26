@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekasc/pi-go/internal/agent"
-	"github.com/ekasc/pi-go/internal/provider"
-	"github.com/ekasc/pi-go/internal/session"
-	"github.com/ekasc/pi-go/internal/tools"
+	"github.com/ekasc/escape/engine/internal/agent"
+	"github.com/ekasc/escape/engine/internal/provider"
+	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape/engine/internal/tools"
 )
 
 // newTestServer wires a fake-provider agent behind an rpc.Server over pipes.
@@ -29,7 +29,7 @@ func newTestServer(t *testing.T, handler func(ctx context.Context, req provider.
 	ag := agent.New(agent.Options{
 		Store:    store,
 		Provider: &provider.Fake{Handler: handler},
-		Tools:    tools.Default(dir),
+		Tools:    tools.Default(tools.Deps{Cwd: dir}),
 		Cwd:      dir,
 		Model:    "fake-model",
 	})
@@ -189,7 +189,7 @@ func TestServeRoundTrip(t *testing.T) {
 		t.Fatalf("roles = %v", roles)
 	}
 
-	// The file must be readable by a Babylon-style tail reader.
+	// The file must be readable by a the desktop shell-style tail reader.
 	tail, start, err := session.Tail(store.Path(), 2048)
 	if err != nil || len(tail) == 0 || start <= 0 {
 		t.Fatalf("tail: %v start=%d n=%d", err, start, len(tail))

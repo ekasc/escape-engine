@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Info is the session metadata Babylon's reader computes (readSessionInfo).
+// Info is the session metadata the desktop shell's reader computes (readSessionInfo).
 type Info struct {
 	ID            string `json:"id"`
 	Path          string `json:"path"`
@@ -25,7 +25,7 @@ type Info struct {
 
 const edgeBytes = 96 * 1024
 
-// ReadInfo mirrors Babylon's readSessionInfo: reads bounded head+tail windows
+// ReadInfo mirrors the desktop shell's readSessionInfo: reads bounded head+tail windows
 // (never O(file)) and extracts id, cwd, name (last non-empty session_info
 // name) and the first user message text. Returns nil if the file has no
 // session header.
@@ -88,7 +88,7 @@ func ReadInfo(path string) (*Info, error) {
 		info.Name = strings.TrimSpace(e.Name)
 	}
 
-	// First user text (head only, matching Babylon).
+	// First user text (head only, matching the desktop shell).
 	for _, obj := range headObjects {
 		e, ok := obj.(Entry)
 		if !ok || e.Type != TypeMessage || e.Message == nil || e.Message.Role != RoleUser {
@@ -107,13 +107,13 @@ func ReadInfo(path string) (*Info, error) {
 }
 
 // Tail reads the last maxBytes of the file aligned to line boundaries,
-// mirroring Babylon's readSessionTail. Returns entries and the byte offset of
+// mirroring the desktop shell's readSessionTail. Returns entries and the byte offset of
 // the first parsed line (for paging older windows).
 func Tail(path string, maxBytes int64) ([]Entry, int64, error) {
 	return Range(path, nil, maxBytes)
 }
 
-// Range mirrors Babylon's readSessionRange: a window ending at endOffset
+// Range mirrors the desktop shell's readSessionRange: a window ending at endOffset
 // (nil = EOF), costing O(maxBytes), never O(file size). If the window ends
 // mid-record it extends backward until a complete line appears.
 func Range(path string, endOffset *int64, maxBytes int64) ([]Entry, int64, error) {
@@ -231,7 +231,7 @@ func parseEntries(raw []byte) []Entry {
 }
 
 // LastName returns the last non-empty session_info name among entries (the
-// session title), mirroring Babylon's getSessionName() semantics.
+// session title), mirroring the desktop shell's getSessionName() semantics.
 func LastName(entries []Entry) string {
 	var name string
 	for _, e := range entries {

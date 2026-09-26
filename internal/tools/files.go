@@ -17,8 +17,9 @@ const (
 // Read prints a file with line numbers, optionally windowed by offset/limit.
 func Read(cwd string) Tool {
 	return Tool{
-		Name:        "read",
-		Description: "Read a file with line numbers. Use offset and limit to window large files.",
+		Name:         "read",
+		ParallelSafe: true,
+		Description:  "Read a file with line numbers. Use offset and limit to window large files.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -58,6 +59,15 @@ func Read(cwd string) Tool {
 }
 
 func readWindow(path string, offset, limit int) Result {
+	// Image files are returned whole as a base64 data URI (offset/limit do
+	// not apply to images); everything else is rendered as numbered lines.
+	if mime, ok := imageMIME(path); ok {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return errResult(fmt.Errorf("read %s: %w", path, err))
+		}
+		return imageResult(mime, data)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return errResult(fmt.Errorf("read %s: %w", path, err))
@@ -118,8 +128,9 @@ func Write(cwd string) Tool {
 // Grep searches files recursively for a regexp.
 func Grep(cwd string) Tool {
 	return Tool{
-		Name:        "grep",
-		Description: "Search files for a regular expression. Skips .git and binary files. Results are file:line:text.",
+		Name:         "grep",
+		ParallelSafe: true,
+		Description:  "Search files for a regular expression. Skips .git and binary files. Results are file:line:text.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -212,8 +223,9 @@ func isBinary(path string) bool {
 // Glob lists files matching a glob pattern (supports ** recursion).
 func Glob(cwd string) Tool {
 	return Tool{
-		Name:        "glob",
-		Description: "List files matching a glob pattern relative to the workspace. Use ** for recursive matches (e.g. **/*.go).",
+		Name:         "glob",
+		ParallelSafe: true,
+		Description:  "List files matching a glob pattern relative to the workspace. Use ** for recursive matches (e.g. **/*.go).",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

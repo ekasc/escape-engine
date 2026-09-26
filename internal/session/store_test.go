@@ -36,7 +36,7 @@ func TestOpenWritesHeader(t *testing.T) {
 	}
 }
 
-// TestShapeCompatibility locks the JSONL shape to what Babylon's reader
+// TestShapeCompatibility locks the JSONL shape to what the desktop shell's reader
 // (electron/sessions.ts) expects: message entries with entry.message carrying
 // role/content/timestamp, toolCallId on tool results, session_info with name.
 func TestShapeCompatibility(t *testing.T) {
@@ -91,7 +91,7 @@ func TestShapeCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Re-read raw lines and check with the same eyes as Babylon.
+	// Re-read raw lines and check with the same eyes as the desktop shell.
 	raw, _ := os.ReadFile(s.Path())
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
 	if len(lines) != 5 { // header + user + assistant + toolResult + session_info
@@ -102,7 +102,7 @@ func TestShapeCompatibility(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &e); err != nil {
 		t.Fatal(err)
 	}
-	// Babylon: entry.type === "message", entry.id, entry.message.role/content/timestamp
+	// the desktop shell: entry.type === "message", entry.id, entry.message.role/content/timestamp
 	if e["type"] != "message" {
 		t.Errorf("line 1 type = %v", e["type"])
 	}
@@ -131,7 +131,7 @@ func TestShapeCompatibility(t *testing.T) {
 	}
 
 	// The tool result must also be findable via the toolCallId scan that
-	// Babylon's readToolOutput performs.
+	// the desktop shell's readToolOutput performs.
 	found := false
 	for _, line := range lines {
 		if !strings.Contains(line, "call_1") {
@@ -215,7 +215,7 @@ func TestTailAndRange(t *testing.T) {
 	}
 }
 
-// TestTailBackfill covers Babylon's window-extension behavior: a giant single
+// TestTailBackfill covers the desktop shell's window-extension behavior: a giant single
 // line (multi-MB tool output) must not break the tail read.
 func TestTailBackfill(t *testing.T) {
 	s := newTestStore(t)

@@ -8,38 +8,62 @@ import "sync"
 // Event is one entry on the agent's event bus, serialized to the wire by the
 // rpc layer as {"type":"event","event":<name>,...}.
 type Event struct {
-	Type        string         `json:"type"`
-	Event       string         `json:"event"`
-	TurnID      string         `json:"turnId,omitempty"`
-	SessionID   string         `json:"sessionId,omitempty"`
-	SessionFile string         `json:"sessionFile,omitempty"`
-	Cwd         string         `json:"cwd,omitempty"`
-	Role        string         `json:"role,omitempty"`
-	Text        string         `json:"text,omitempty"`
-	MessageID   string         `json:"messageId,omitempty"`
-	Model       string         `json:"model,omitempty"`
-	Timestamp   int64          `json:"timestamp,omitempty"`
-	Iteration   int            `json:"iteration,omitempty"`
-	ToolCallID  string         `json:"toolCallId,omitempty"`
-	Name        string         `json:"name,omitempty"`
-	Args        map[string]any `json:"args,omitempty"`
-	Output      string         `json:"output,omitempty"`
-	Error       bool           `json:"error,omitempty"`
-	Reason      string         `json:"reason,omitempty"`
-	Message     string         `json:"message,omitempty"`
+	Type                 string         `json:"type"`
+	Event                string         `json:"event"`
+	TurnID               string         `json:"turnId,omitempty"`
+	SessionID            string         `json:"sessionId,omitempty"`
+	SessionFile          string         `json:"sessionFile,omitempty"`
+	Cwd                  string         `json:"cwd,omitempty"`
+	Role                 string         `json:"role,omitempty"`
+	Text                 string         `json:"text,omitempty"`
+	MessageID            string         `json:"messageId,omitempty"`
+	Model                string         `json:"model,omitempty"`
+	Timestamp            int64          `json:"timestamp,omitempty"`
+	Iteration            int            `json:"iteration,omitempty"`
+	ToolCallID           string         `json:"toolCallId,omitempty"`
+	Name                 string         `json:"name,omitempty"`
+	Args                 map[string]any `json:"args,omitempty"`
+	Output               string         `json:"output,omitempty"`
+	Error                bool           `json:"error,omitempty"`
+	Reason               string         `json:"reason,omitempty"`
+	Message              string         `json:"message,omitempty"`
+	Summary              string         `json:"summary,omitempty"`
+	Question             string         `json:"question,omitempty"`
+	Choices              []string       `json:"choices,omitempty"`
+	FirstKeptEntryID     string         `json:"firstKeptEntryId,omitempty"`
+	TokensBefore         int            `json:"tokensBefore,omitempty"`
+	EstimatedTokensAfter int            `json:"estimatedTokensAfter,omitempty"`
+	Attempt              int            `json:"attempt,omitempty"`
+	MaxAttempts          int            `json:"maxAttempts,omitempty"`
+	DelayMs              int            `json:"delayMs,omitempty"`
+	ErrorMessage         string         `json:"errorMessage,omitempty"`
+	FinalError           string         `json:"finalError,omitempty"`
+	Steering             []string       `json:"steering,omitempty"`
+	FollowUp             []string       `json:"followUp,omitempty"`
+	Success              bool           `json:"success,omitempty"`
 }
 
 // Event names on the wire.
 const (
-	EventTurnStarted    = "turn_started"
-	EventMessageStart   = "message_start"
-	EventMessageDelta   = "message_delta"
-	EventMessageEnd     = "message_end"
-	EventToolCall       = "tool_call"
-	EventToolResult     = "tool_result"
-	EventSettled        = "agent_settled"
-	EventError          = "error"
-	EventSessionStarted = "session_started"
+	EventTurnStarted       = "turn_started"
+	EventMessageStart      = "message_start"
+	EventMessageDelta      = "message_delta"
+	EventMessageEnd        = "message_end"
+	EventToolCall          = "tool_call"
+	EventToolResult        = "tool_result"
+	EventSettled           = "agent_settled"
+	EventError             = "error"
+	EventSessionStarted    = "session_started"
+	EventQuestionRequested = "question_requested"
+	EventApprovalRequested = "approval_requested"
+	EventCompactionStart   = "compaction_start"
+	EventCompactionEnd     = "compaction_end"
+	EventTurnEnd           = "turn_end"
+	EventAgentStart        = "agent_start"
+	EventAgentEnd          = "agent_end"
+	EventAutoRetryStart    = "auto_retry_start"
+	EventAutoRetryEnd      = "auto_retry_end"
+	EventQueueUpdate       = "queue_update"
 )
 
 // Settle reasons for agent_settled.

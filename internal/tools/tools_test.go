@@ -209,8 +209,8 @@ func TestRegistry(t *testing.T) {
 }
 
 func TestDefaultSet(t *testing.T) {
-	r := New(Default("/tmp")...)
-	want := []string{"bash", "edit", "glob", "grep", "read", "write"}
+	r := New(Default(Deps{Cwd: "/tmp"})...)
+	want := []string{"bash", "edit", "glob", "grep", "memory", "question", "read", "sessions", "web_search", "write"}
 	got := r.List()
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools: %v", len(got), toolNames(got))

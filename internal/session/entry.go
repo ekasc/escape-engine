@@ -1,6 +1,6 @@
 // Package session implements the pi-compatible JSONL session store.
 //
-// The on-disk shape is the contract Babylon's reader
+// The on-disk shape is the contract the desktop shell's reader
 // (electron/sessions.ts -> readSessionTail/readSessionRange/readSessionInfo)
 // depends on, so these files must stay readable by it unchanged:
 //
@@ -20,6 +20,10 @@ import (
 
 // Entry is one JSONL line in a session file. Field names and semantics follow
 // pi's session format v3.
+//
+// Compaction and branch_summary entries carry their data as dedicated flat
+// fields (summary, firstKeptEntryId, tokensBefore, fromId, details, usage),
+// matching pi's on-disk shape byte for byte.
 type Entry struct {
 	Type          string   `json:"type"`
 	Version       int      `json:"version,omitempty"`
@@ -34,14 +38,37 @@ type Entry struct {
 	ModelID       string   `json:"modelId,omitempty"`
 	Model         string   `json:"model,omitempty"`
 	Message       *Message `json:"message,omitempty"`
+
+	// Compaction entry fields (type "compaction"): summary of the compacted
+	// prefix, id of the first entry kept after the cut, tokens consumed before
+	// compaction, optional file-tracking details and summary-generation usage.
+	Summary          string `json:"summary,omitempty"`
+	FirstKeptEntryID string `json:"firstKeptEntryId,omitempty"`
+	TokensBefore     int    `json:"tokensBefore,omitempty"`
+	SnapcompactData  string `json:"snapcompactData,omitempty"`
+	FromHook         bool   `json:"fromHook,omitempty"`
+
+	// BranchSummary entry fields (type "branch_summary"): summary of the
+	// abandoned branch and the entry id the branch departed from.
+	FromID string `json:"fromId,omitempty"`
+
+	// Details is implementation-specific data shared by compaction and
+	// branch_summary entries (e.g. {readFiles, modifiedFiles}).
+	Details any `json:"details,omitempty"`
+	// Usage is the LLM usage from generating a compaction/branch_summary
+	// summary, included in session token and cost totals.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // Entry types written by this runtime.
 const (
-	TypeSession     = "session"
-	TypeMessage     = "message"
-	TypeSessionInfo = "session_info"
-	TypeModelChange = "model_change"
+	TypeSession       = "session"
+	TypeMessage       = "message"
+	TypeSessionInfo   = "session_info"
+	TypeModelChange   = "model_change"
+	TypeCompaction    = "compaction"
+	TypeBranchSummary = "branch_summary"
+	TypeCustom        = "custom_message"
 )
 
 // Message roles (pi-compatible).
@@ -84,6 +111,9 @@ type Block struct {
 	ID        string         `json:"id,omitempty"`
 	Name      string         `json:"name,omitempty"`
 	Arguments map[string]any `json:"arguments,omitempty"`
+	Data      string         `json:"data,omitempty"`
+	MimeType  string         `json:"mimeType,omitempty"`
+	Source    string         `json:"source,omitempty"`
 }
 
 // Block types.
@@ -91,6 +121,7 @@ const (
 	BlockText     = "text"
 	BlockThinking = "thinking"
 	BlockToolCall = "toolCall"
+	BlockImage    = "image"
 )
 
 // Usage mirrors pi's token accounting (costs omitted in v1).

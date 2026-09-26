@@ -1,4 +1,5 @@
-BINARY := pi-go
+BINARY := escape
+GOBIN ?= $(firstword $(subst :, ,$(shell go env GOPATH)))/bin
 
 .PHONY: build test race vet fmt install clean
 
@@ -18,7 +19,7 @@ fmt:
 	gofmt -l -w .
 
 install:
-	go install .
+	GOBIN="$(GOBIN)" go build -o "$(GOBIN)/$(BINARY)" .
 
 clean:
 	rm -f $(BINARY)

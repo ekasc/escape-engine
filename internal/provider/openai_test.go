@@ -189,6 +189,36 @@ data: [DONE]
 	}
 }
 
+func TestUsageReportedWithCacheRead(t *testing.T) {
+	body := `data: {"choices":[{"delta":{"content":"x"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":40}}}
+
+data: [DONE]
+`
+	c, _ := serveSSE(t, body, http.StatusOK)
+	s, _ := c.Stream(context.Background(), Request{})
+	defer s.Close()
+
+	var u Usage
+	for {
+		ev, err := s.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Kind == EventDone {
+			u = ev.Usage
+		}
+	}
+	rate, ok := CacheHitRate(u)
+	if !ok || rate != 0.4 || !u.CacheReadAvailable {
+		t.Fatalf("cache usage = %+v, rate=%v available=%v", u, rate, ok)
+	}
+}
+
 func TestWireMessagesToolRoundTrip(t *testing.T) {
 	msgs := []Message{
 		{Role: "user", Text: "hi"},

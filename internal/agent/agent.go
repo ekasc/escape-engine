@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,13 +10,22 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ekasc/pi-go/internal/provider"
-	"github.com/ekasc/pi-go/internal/session"
-	"github.com/ekasc/pi-go/internal/tools"
+	"github.com/ekasc/escape/engine/internal/provider"
+	"github.com/ekasc/escape/engine/internal/session"
+	"github.com/ekasc/escape/engine/internal/settings"
+	"github.com/ekasc/escape/engine/internal/tools"
 )
 
 // ErrBusy is returned when Send is called while a turn is running.
 var ErrBusy = errors.New("agent busy: a turn is already running")
+
+// ApprovalMode controls whether side-effecting tools require user approval.
+type ApprovalMode string
+
+const (
+	ApprovalAuto ApprovalMode = "auto"
+	ApprovalAsk  ApprovalMode = "ask"
+)
 
 // NamingSystemPrompt is the system prompt for the auto-naming meta-call. Fake
 // providers key off this exact string, so keep it stable.
@@ -38,14 +48,22 @@ func IsRecapRequest(req provider.Request) bool {
 
 // Options configures an Agent.
 type Options struct {
-	Store         *session.Store
-	Provider      provider.Provider
-	Tools         []tools.Tool
-	Cwd           string
-	Model         string
-	SystemPrompt  string
-	MaxIterations int // per-turn tool loop guard
-	MaxRetries    int // bounded provider retries
+	Store                 *session.Store
+	Provider              provider.Provider
+	Tools                 []tools.Tool
+	Cwd                   string
+	Model                 string
+	SystemPrompt          string
+	MaxIterations         int // per-turn tool loop guard
+	MaxRetries            int // bounded provider retries
+	MaxTokens             int // optional provider output-token limit
+	Settings              *settings.Settings
+	ApprovalMode          ApprovalMode
+	QuietResourceWarnings bool
+	// Memory is the project's durable notes, already rendered. It is a plain
+	// string rather than a store so the agent cannot re-read it mid-session:
+	// the snapshot stays frozen, which keeps the provider prefix cache valid.
+	Memory string
 }
 
 func (o Options) withDefaults() Options {
@@ -58,6 +76,17 @@ func (o Options) withDefaults() Options {
 	if o.SystemPrompt == "" {
 		o.SystemPrompt = "You are a coding agent working in " + o.Cwd + ". " +
 			"Use the available tools to inspect and change files. Be concise and precise."
+	}
+	if o.Settings == nil {
+		o.Settings = settings.Defaults()
+	}
+	switch o.ApprovalMode {
+	case "":
+		o.ApprovalMode = ApprovalAuto
+	case ApprovalAuto, ApprovalAsk:
+	default:
+		// Fail closed if a caller constructs Options directly with an invalid mode.
+		o.ApprovalMode = ApprovalAsk
 	}
 	return o
 }
@@ -72,19 +101,21 @@ const (
 
 // TurnInfo is the payload for the `state` RPC method.
 type TurnInfo struct {
-	State        State    `json:"state"`
-	TurnID       string   `json:"turnId,omitempty"`
-	Model        string   `json:"model"`
-	StartedAt    int64    `json:"startedAt,omitempty"`
-	SettleReason string   `json:"settleReason,omitempty"`
-	Capabilities []string `json:"capabilities"`
+	State        State        `json:"state"`
+	TurnID       string       `json:"turnId,omitempty"`
+	Model        string       `json:"model"`
+	ApprovalMode ApprovalMode `json:"approvalMode"`
+	StartedAt    int64        `json:"startedAt,omitempty"`
+	SettleReason string       `json:"settleReason,omitempty"`
+	Capabilities []string     `json:"capabilities"`
 }
 
 // Agent runs turns against one session file.
 type Agent struct {
-	opts Options
-	bus  *Bus
-	reg  *tools.Registry
+	opts  Options
+	bus   *Bus
+	reg   *tools.Registry
+	specs []provider.ToolSpec
 
 	mu           sync.Mutex
 	state        State
@@ -95,17 +126,38 @@ type Agent struct {
 	cancel       context.CancelFunc
 
 	titleSet bool
+
+	systemPrompt  string
+	steerQueue    []string
+	followUpQueue []string
+	questions     map[string]chan string
+	approvals     map[string]chan bool
+	retryAbort    chan struct{}
 }
 
 // New builds an agent. The store must already be open.
 func New(opts Options) *Agent {
 	opts = opts.withDefaults()
-	return &Agent{
-		opts:  opts,
-		bus:   NewBus(),
-		reg:   tools.New(opts.Tools...),
-		state: StateIdle,
+	reg := tools.New(opts.Tools...)
+	a := &Agent{
+		opts:         opts,
+		bus:          NewBus(),
+		reg:          reg,
+		specs:        reg.Specs(),
+		state:        StateIdle,
+		systemPrompt: buildSystemPrompt(opts),
+		questions:    make(map[string]chan string),
+		approvals:    make(map[string]chan bool),
+		retryAbort:   make(chan struct{}),
 	}
+	// Bind the session ID to the provider so transports that require it (e.g.
+	// the x-opencode-session header) send it on every request, including after
+	// a session switch. Previously only the CLI entry points did this, which
+	// left the RPC path without a session ID.
+	if setter, ok := opts.Provider.(interface{ SetSessionID(string) }); ok && opts.Store != nil {
+		setter.SetSessionID(opts.Store.ID())
+	}
+	return a
 }
 
 // Events subscribes to the agent's event stream.
@@ -118,7 +170,7 @@ func (a *Agent) Unsubscribe(ch chan Event) { a.bus.Unsubscribe(ch) }
 func (a *Agent) State() TurnInfo {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	info := TurnInfo{State: a.state, TurnID: a.turnID, Model: a.opts.Model, SettleReason: a.settleReason, Capabilities: []string{"recap", "auto-naming"}}
+	info := TurnInfo{State: a.state, TurnID: a.turnID, Model: a.opts.Model, ApprovalMode: a.opts.ApprovalMode, SettleReason: a.settleReason, Capabilities: []string{"recap", "auto-naming"}}
 	if !a.turnStart.IsZero() {
 		info.StartedAt = a.turnStart.UnixMilli()
 	}
@@ -148,6 +200,101 @@ func (a *Agent) Send(text string) (string, error) {
 
 	go a.runTurn(ctx, text)
 	return a.turnID, nil
+}
+
+// SetModel changes the model used for subsequent turns.
+func (a *Agent) MaxTokens() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.opts.MaxTokens
+}
+
+func (a *Agent) SetMaxTokens(maxTokens int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.opts.MaxTokens = maxTokens
+}
+
+func (a *Agent) SetModel(model string) {
+	a.mu.Lock()
+	a.opts.Model = model
+	a.mu.Unlock()
+}
+
+func (a *Agent) SetProvider(p provider.Provider) {
+	a.mu.Lock()
+	a.opts.Provider = p
+	if setter, ok := p.(interface{ SetSessionID(string) }); ok && a.opts.Store != nil {
+		setter.SetSessionID(a.opts.Store.ID())
+	}
+	a.mu.Unlock()
+}
+
+// SwitchStore changes the active session after the current turn has settled.
+func (a *Agent) SwitchStore(store *session.Store) error {
+	if store == nil {
+		return errors.New("cannot switch to a nil session store")
+	}
+	a.mu.Lock()
+	if a.state == StateRunning {
+		a.mu.Unlock()
+		return errors.New("cannot switch sessions while the agent is running")
+	}
+	a.opts.Store = store
+	a.titleSet = false
+	provider := a.opts.Provider
+	a.mu.Unlock()
+	if setter, ok := provider.(interface{ SetSessionID(string) }); ok {
+		setter.SetSessionID(store.ID())
+	}
+	return nil
+}
+
+// Rename persists a title for the active session.
+func (a *Agent) Rename(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("session name cannot be empty")
+	}
+	a.mu.Lock()
+	if a.state == StateRunning {
+		a.mu.Unlock()
+		return errors.New("cannot rename session while the agent is running")
+	}
+	store := a.opts.Store
+	a.mu.Unlock()
+	if store == nil {
+		return errors.New("cannot rename without an active session store")
+	}
+	if err := session.SetName(store.Path(), name); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.titleSet = true
+	a.mu.Unlock()
+	return nil
+}
+
+// SetApprovalMode changes the policy used for subsequent side-effecting tools.
+func (a *Agent) SetApprovalMode(mode ApprovalMode) error {
+	if mode != ApprovalAuto && mode != ApprovalAsk {
+		return fmt.Errorf("unknown approval mode %q (want auto or ask)", mode)
+	}
+	a.mu.Lock()
+	if a.state == StateRunning {
+		a.mu.Unlock()
+		return errors.New("cannot change approval mode while the agent is running")
+	}
+	a.opts.ApprovalMode = mode
+	a.mu.Unlock()
+	return nil
+}
+
+// SetThinkingLevel updates the provider's reasoning effort when supported.
+func (a *Agent) SetThinkingLevel(level string) {
+	if ts, ok := a.opts.Provider.(interface{ SetReasoningEffort(string) }); ok {
+		ts.SetReasoningEffort(level)
+	}
 }
 
 // Stop aborts the current turn. The loop settles with reason "stopped".
@@ -184,6 +331,71 @@ func (a *Agent) Wait() {
 	}
 }
 
+// QueueSteer queues a steering message for delivery after the current
+// assistant turn completes its tool calls (pi steering semantics). When the
+// agent is idle it sends immediately.
+func (a *Agent) QueueSteer(text string) (string, error) {
+	return a.queueMessage(text, true)
+}
+
+// FollowUp queues a follow-up message for delivery after the agent settles.
+// When the agent is idle it sends immediately.
+func (a *Agent) FollowUp(text string) (string, error) {
+	return a.queueMessage(text, false)
+}
+
+func (a *Agent) queueMessage(text string, steer bool) (string, error) {
+	a.mu.Lock()
+	if a.state == StateIdle {
+		a.mu.Unlock()
+		return a.Send(text)
+	}
+	if steer {
+		a.steerQueue = append(a.steerQueue, text)
+	} else {
+		a.followUpQueue = append(a.followUpQueue, text)
+	}
+	steering := append([]string(nil), a.steerQueue...)
+	followUp := append([]string(nil), a.followUpQueue...)
+	a.mu.Unlock()
+	a.publish(Event{Event: EventQueueUpdate, Steering: steering, FollowUp: followUp})
+	return "", nil
+}
+
+// deliverQueued starts the next queued turn (steer priority over follow-up),
+// honoring the steering/follow-up delivery modes.
+func (a *Agent) deliverQueued() {
+	a.mu.Lock()
+	steerMode := a.opts.Settings.SteeringMode
+	followMode := a.opts.Settings.FollowUpMode
+	var text string
+	if len(a.steerQueue) > 0 {
+		if steerMode == "all" {
+			text = strings.Join(a.steerQueue, "\n")
+			a.steerQueue = nil
+		} else {
+			text = a.steerQueue[0]
+			a.steerQueue = a.steerQueue[1:]
+		}
+	} else if len(a.followUpQueue) > 0 {
+		if followMode == "all" {
+			text = strings.Join(a.followUpQueue, "\n")
+			a.followUpQueue = nil
+		} else {
+			text = a.followUpQueue[0]
+			a.followUpQueue = a.followUpQueue[1:]
+		}
+	} else {
+		a.mu.Unlock()
+		return
+	}
+	steering := append([]string(nil), a.steerQueue...)
+	followUp := append([]string(nil), a.followUpQueue...)
+	a.mu.Unlock()
+	a.publish(Event{Event: EventQueueUpdate, Steering: steering, FollowUp: followUp})
+	_, _ = a.Send(text)
+}
+
 func (a *Agent) publish(ev Event) { a.bus.Publish(ev) }
 
 func (a *Agent) settle(reason string) {
@@ -195,15 +407,21 @@ func (a *Agent) settle(reason string) {
 	a.settled = nil
 	a.mu.Unlock()
 
+	a.publish(Event{Event: EventTurnEnd, TurnID: turnID, Reason: reason})
+	a.publish(Event{Event: EventAgentEnd, TurnID: turnID, Reason: reason})
 	a.publish(Event{Event: EventSettled, TurnID: turnID, Reason: reason})
 	if ch != nil {
 		close(ch)
+	}
+	if reason == ReasonDone {
+		a.deliverQueued()
 	}
 }
 
 // runTurn executes one full send -> model -> tools -> settle cycle.
 func (a *Agent) runTurn(ctx context.Context, text string) {
 	turnID := a.currentTurnID()
+	a.publish(Event{Event: EventAgentStart, TurnID: turnID})
 	a.publish(Event{Event: EventTurnStarted, TurnID: turnID, Text: text})
 
 	defer func() {
@@ -251,13 +469,22 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 			return
 		}
 
-		hist, err := historyFromStore(a.opts.Store.Path(), a.opts.SystemPrompt)
+		// Auto-compaction: summarize older entries when the conversation
+		// nears the model's context window. Best-effort: a failure here must
+		// not kill the turn.
+		if a.opts.Settings.Compaction.Enabled {
+			if err := a.autoCompactIfNeeded(ctx); err != nil {
+				a.publish(Event{Event: EventError, Message: "compaction skipped: " + err.Error()})
+			}
+		}
+
+		hist, err := historyFromStore(a.opts.Store.Path(), a.systemPrompt)
 		if err != nil {
 			a.publish(Event{Event: EventError, Message: fmt.Sprintf("failed to build history: %v", err)})
 			a.settle(ReasonError)
 			return
 		}
-		req := provider.Request{Model: a.opts.Model, Messages: hist, Tools: a.reg.Specs()}
+		req := provider.Request{Model: a.opts.Model, Messages: hist, Tools: a.specs, MaxTokens: a.opts.MaxTokens}
 
 		stream, err := a.streamWithRetry(ctx, req)
 		if err != nil {
@@ -292,12 +519,10 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 			a.settle(ReasonDone)
 			return
 		}
-		for _, tc := range out.ToolCalls {
-			a.runOneTool(ctx, turnID, tc, assistantEntry.ID)
-			if ctx.Err() != nil {
-				a.finishAborted(turnID, nil)
-				return
-			}
+		a.runToolCalls(ctx, turnID, out.ToolCalls, assistantEntry.ID)
+		if ctx.Err() != nil {
+			a.finishAborted(turnID, nil)
+			return
 		}
 	}
 }
@@ -317,6 +542,7 @@ func (o *turnOutput) empty() bool {
 // message_start/message_delta events as text arrives.
 func (a *Agent) consumeStream(ctx context.Context, turnID string, stream provider.Stream, iter int) (*turnOutput, string, error) {
 	out := &turnOutput{}
+	thinking := &thinkingFilter{}
 	stopReason := "stop"
 	a.publish(Event{Event: EventMessageStart, TurnID: turnID, Role: session.RoleAssistant, Iteration: iter})
 	for {
@@ -329,8 +555,10 @@ func (a *Agent) consumeStream(ctx context.Context, turnID string, stream provide
 		}
 		switch ev.Kind {
 		case provider.EventText:
-			out.Text.WriteString(ev.Text)
-			a.publish(Event{Event: EventMessageDelta, TurnID: turnID, Role: session.RoleAssistant, Text: ev.Text})
+			if visible := thinking.Feed(ev.Text); visible != "" {
+				out.Text.WriteString(visible)
+				a.publish(Event{Event: EventMessageDelta, TurnID: turnID, Role: session.RoleAssistant, Text: visible})
+			}
 		case provider.EventThinking:
 			out.Thinking.WriteString(ev.Thinking)
 		case provider.EventToolCall:
@@ -342,6 +570,10 @@ func (a *Agent) consumeStream(ctx context.Context, turnID string, stream provide
 			out.Usage = ev.Usage
 		}
 	}
+	if visible := thinking.Flush(); visible != "" {
+		out.Text.WriteString(visible)
+		a.publish(Event{Event: EventMessageDelta, TurnID: turnID, Role: session.RoleAssistant, Text: visible})
+	}
 	if ctx.Err() != nil {
 		return out, stopReason, ctx.Err()
 	}
@@ -351,29 +583,65 @@ func (a *Agent) consumeStream(ctx context.Context, turnID string, stream provide
 // streamWithRetry calls the provider, retrying retryable errors with bounded
 // backoff (max MaxRetries attempts).
 func (a *Agent) streamWithRetry(ctx context.Context, req provider.Request) (provider.Stream, error) {
+	a.mu.Lock()
+	a.retryAbort = make(chan struct{})
+	retryAbort := a.retryAbort
+	a.mu.Unlock()
+	r := a.opts.Settings.Retry
+	if !r.Enabled {
+		return a.opts.Provider.Stream(ctx, req)
+	}
+	maxAttempts := r.MaxRetries
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	baseDelay := r.BaseDelayMs
+	if baseDelay <= 0 {
+		baseDelay = 2000
+	}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		s, err := a.opts.Provider.Stream(ctx, req)
 		if err == nil {
+			if attempt > 0 {
+				a.publish(Event{Event: EventAutoRetryEnd, Attempt: attempt, Success: true})
+			}
 			return s, nil
 		}
 		lastErr = err
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if attempt >= a.opts.MaxRetries {
+		if attempt >= maxAttempts {
+			a.publish(Event{Event: EventAutoRetryEnd, Attempt: attempt, FinalError: err.Error()})
 			return nil, lastErr
 		}
 		var re *provider.RetryableError
 		if !errors.As(err, &re) {
 			return nil, lastErr
 		}
-		delay := time.Duration(300*(1<<attempt)) * time.Millisecond
-		a.publish(Event{Event: EventError, Message: fmt.Sprintf("provider error (retrying in %s): %v", delay, err)})
+		delay := time.Duration(baseDelay*(1<<uint(attempt))) * time.Millisecond
+		a.publish(Event{Event: EventAutoRetryStart, Attempt: attempt + 1, MaxAttempts: maxAttempts, DelayMs: int(delay.Milliseconds()), ErrorMessage: err.Error()})
 		select {
 		case <-time.After(delay):
+		case <-retryAbort:
+			a.publish(Event{Event: EventAutoRetryEnd, Attempt: attempt + 1, Success: false, FinalError: "retry aborted"})
+			return nil, fmt.Errorf("retry aborted")
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		}
+	}
+}
+
+// AbortRetry cancels a pending provider retry backoff.
+func (a *Agent) AbortRetry() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.retryAbort != nil {
+		select {
+		case <-a.retryAbort:
+		default:
+			close(a.retryAbort)
 		}
 	}
 }
@@ -403,7 +671,7 @@ func (a *Agent) appendAssistant(turnID string, out *turnOutput, stopReason strin
 		Role:       session.RoleAssistant,
 		Content:    blocks,
 		Model:      a.opts.Model,
-		Provider:   "pi-go",
+		Provider:   "escape",
 		StopReason: sr,
 		Usage:      toSessionUsage(out.Usage),
 		Timestamp:  session.NowMillis(),
@@ -416,16 +684,147 @@ func (a *Agent) appendAssistant(turnID string, out *turnOutput, stopReason strin
 	return entry, nil
 }
 
+func (a *Agent) AnswerQuestion(id, answer string) error {
+	a.mu.Lock()
+	ch, ok := a.questions[id]
+	a.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("question %q is not pending", id)
+	}
+	select {
+	case ch <- answer:
+		return nil
+	default:
+		return fmt.Errorf("question %q already has an answer", id)
+	}
+}
+
+// AnswerApproval resolves a pending approval request for a side-effecting tool.
+func (a *Agent) AnswerApproval(id string, approved bool) error {
+	a.mu.Lock()
+	ch, ok := a.approvals[id]
+	a.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("approval %q is not pending", id)
+	}
+	select {
+	case ch <- approved:
+		return nil
+	default:
+		return fmt.Errorf("approval %q already has an answer", id)
+	}
+}
+
+func (a *Agent) runQuestion(ctx context.Context, turnID string, tc provider.ToolCall) tools.Result {
+	var args struct {
+		Question string   `json:"question"`
+		Choices  []string `json:"choices"`
+	}
+	if err := json.Unmarshal(mustJSON(tc.Args), &args); err != nil || strings.TrimSpace(args.Question) == "" {
+		return tools.Result{Output: "question requires a non-empty question", IsError: true}
+	}
+	ch := make(chan string, 1)
+	a.mu.Lock()
+	a.questions[tc.ID] = ch
+	a.mu.Unlock()
+	a.publish(Event{Event: EventQuestionRequested, TurnID: turnID, ToolCallID: tc.ID, Name: tc.Name, Args: tc.Args, Question: args.Question, Choices: args.Choices})
+	select {
+	case answer := <-ch:
+		return tools.Result{Output: answer}
+	case <-ctx.Done():
+		a.mu.Lock()
+		delete(a.questions, tc.ID)
+		a.mu.Unlock()
+		return tools.Result{Output: "question cancelled", IsError: true}
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func (a *Agent) runToolCalls(ctx context.Context, turnID string, calls []provider.ToolCall, parentID string) {
+	allParallel := true
+	for _, tc := range calls {
+		t, ok := a.reg.Get(tc.Name)
+		if !ok || !t.ParallelSafe {
+			allParallel = false
+			break
+		}
+	}
+	if !allParallel {
+		for _, tc := range calls {
+			a.runOneTool(ctx, turnID, tc, parentID)
+		}
+		return
+	}
+	var wg sync.WaitGroup
+	for _, tc := range calls {
+		wg.Add(1)
+		go func(tc provider.ToolCall) {
+			defer wg.Done()
+			a.runOneTool(ctx, turnID, tc, parentID)
+		}(tc)
+	}
+	wg.Wait()
+}
+
+func approvalSensitive(name string) bool {
+	switch name {
+	case "bash", "write", "edit":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *Agent) requestApproval(ctx context.Context, turnID string, tc provider.ToolCall) (bool, error) {
+	if a.opts.ApprovalMode != ApprovalAsk || !approvalSensitive(tc.Name) {
+		return true, nil
+	}
+	ch := make(chan bool, 1)
+	a.mu.Lock()
+	a.approvals[tc.ID] = ch
+	a.mu.Unlock()
+	a.publish(Event{Event: EventApprovalRequested, TurnID: turnID, ToolCallID: tc.ID, Name: tc.Name, Args: tc.Args})
+	select {
+	case approved := <-ch:
+		a.mu.Lock()
+		delete(a.approvals, tc.ID)
+		a.mu.Unlock()
+		return approved, nil
+	case <-ctx.Done():
+		a.mu.Lock()
+		delete(a.approvals, tc.ID)
+		a.mu.Unlock()
+		return false, ctx.Err()
+	}
+}
+
 // runOneTool executes one tool call, persists the toolResult entry and emits
 // tool_call/tool_result events.
 func (a *Agent) runOneTool(ctx context.Context, turnID string, tc provider.ToolCall, parentID string) {
 	a.publish(Event{Event: EventToolCall, TurnID: turnID, ToolCallID: tc.ID, Name: tc.Name, Args: tc.Args})
 
 	var res tools.Result
-	if t, ok := a.reg.Get(tc.Name); ok {
-		res = t.Run(ctx, tc.Args)
-	} else {
-		res = tools.Result{Output: fmt.Sprintf("unknown tool %q", tc.Name), IsError: true}
+	approved, err := a.requestApproval(ctx, turnID, tc)
+	switch {
+	case err != nil:
+		res = tools.Result{Output: "tool approval cancelled: " + err.Error(), IsError: true}
+	case !approved:
+		res = tools.Result{Output: "tool execution denied by user", IsError: true}
+	case tc.Name == "question":
+		res = a.runQuestion(ctx, turnID, tc)
+		a.mu.Lock()
+		delete(a.questions, tc.ID)
+		a.mu.Unlock()
+	default:
+		if t, ok := a.reg.Get(tc.Name); ok {
+			res = t.Run(ctx, tc.Args)
+		} else {
+			res = tools.Result{Output: fmt.Sprintf("unknown tool %q", tc.Name), IsError: true}
+		}
 	}
 
 	msg := &session.Message{
@@ -436,7 +835,7 @@ func (a *Agent) runOneTool(ctx context.Context, turnID string, tc provider.ToolC
 		IsError:    res.IsError,
 		Timestamp:  session.NowMillis(),
 	}
-	_, err := a.opts.Store.Append(session.Entry{Type: session.TypeMessage, ParentID: parentID, Message: msg})
+	_, err = a.opts.Store.Append(session.Entry{Type: session.TypeMessage, ParentID: parentID, Message: msg})
 	if err != nil {
 		a.publish(Event{Event: EventError, Message: fmt.Sprintf("failed to persist tool result: %v", err)})
 	}
@@ -489,7 +888,38 @@ func (a *Agent) callText(ctx context.Context, messages []provider.Message, maxTo
 			b.WriteString(ev.Text)
 		}
 	}
-	return b.String(), nil
+	// Meta-calls (naming, recap) must yield only the result. Models that
+	// reason with inline <think>…</think> text would otherwise leak their
+	// thinking into session titles and recap lines.
+	return stripThinking(b.String()), nil
+}
+
+// StripThinking removes inline thinking blocks from model text output.
+func StripThinking(s string) string { return stripThinking(s) }
+
+// stripThinking removes inline thinking blocks from model text output.
+func stripThinking(s string) string {
+	for _, pair := range [][2]string{
+		{"<think>", "</think>"},
+		{"<thinking>", "</thinking>"},
+		{"<reasoning>", "</reasoning>"},
+		{"<antml:thinking>", "</antml:thinking>"},
+	} {
+		open, close := pair[0], pair[1]
+		for {
+			i := strings.Index(s, open)
+			if i < 0 {
+				break
+			}
+			j := strings.Index(s[i+len(open):], close)
+			if j < 0 {
+				s = s[:i]
+				break
+			}
+			s = s[:i] + s[i+len(open)+j+len(close):]
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // nameSession asks the provider for a short title for the first user message
@@ -598,6 +1028,7 @@ func cleanTitle(s string) string {
 
 // cleanRecap collapses a provider recap to a single "Recap: ..." line.
 func cleanRecap(s string) string {
+	s = stripThinking(s) // last gate: thinking must never reach the stored recap
 	t := strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 	if t == "" {
 		return ""

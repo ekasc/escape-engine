@@ -1,4 +1,4 @@
-// Package rpc implements the stdio JSON-RPC 2.0 control surface that Babylon
+// Package rpc implements the stdio JSON-RPC 2.0 control surface that the desktop shell
 // talks to: requests arrive as JSON-Lines on stdin, responses and agent
 // events stream as JSON-Lines on stdout.
 //
@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ekasc/pi-go/internal/agent"
-	"github.com/ekasc/pi-go/internal/session"
+	"github.com/ekasc/escape/engine/internal/agent"
+	"github.com/ekasc/escape/engine/internal/session"
 )
 
 // JSON-RPC error codes.
@@ -184,6 +184,37 @@ func (s *Server) dispatch(ctx context.Context, req request) {
 
 	case "state":
 		s.writeResult(req.ID, s.agent.State())
+
+	case "answer_question":
+		var p struct {
+			ID     string `json:"id"`
+			Answer string `json:"answer"`
+		}
+		if err := decodeParams(req.Params, &p); err != nil {
+			s.writeError(req.ID, codeInvalid, "invalid params: "+err.Error())
+			return
+		}
+		if err := s.agent.AnswerQuestion(p.ID, p.Answer); err != nil {
+			s.writeError(req.ID, codeInternal, err.Error())
+			return
+		}
+		s.writeResult(req.ID, map[string]any{})
+
+	case "compact":
+		result, err := s.agent.Compact(ctx, "")
+		if err != nil {
+			s.writeError(req.ID, codeInternal, err.Error())
+			return
+		}
+		s.writeResult(req.ID, result)
+
+	case "snapcompact":
+		result, err := s.agent.Snapcompact(ctx)
+		if err != nil {
+			s.writeError(req.ID, codeInternal, err.Error())
+			return
+		}
+		s.writeResult(req.ID, result)
 
 	case "recap":
 		text, err := s.agent.Recap(ctx)

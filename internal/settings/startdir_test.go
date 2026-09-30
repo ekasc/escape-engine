@@ -83,3 +83,41 @@ func TestResolveStartDirIsUsableByTheApp(t *testing.T) {
 		t.Fatalf("resolved to %q, which is not a directory: %v", got, err)
 	}
 }
+
+func TestExpandHome(t *testing.T) {
+	home := homeDir()
+	other := t.TempDir()
+
+	cases := map[string]string{
+		"~":              home,
+		"~/":             home,
+		"~/Projects":     filepath.Join(home, "Projects"),
+		"  ~/Projects  ": filepath.Join(home, "Projects"),
+		"/absolute/path": "/absolute/path",
+		"relative/path":  "relative/path",
+		"$HOME/thing":    "$HOME/thing",
+		"":               "",
+		other:            other,
+	}
+	for in, want := range cases {
+		if got := ExpandHome(in); got != want {
+			t.Errorf("ExpandHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestTheHomeDirectoryIsTheDefault(t *testing.T) {
+	// Nothing configured and "configured to the home directory" are the same
+	// answer, so the settings field can read "~/" and mean it.
+	home := homeDir()
+	if got := ResolveStartDir("/", &Settings{}); got != home {
+		t.Errorf("with nothing set, ResolveStartDir(\"/\") = %q, want the default %q", got, home)
+	}
+	if got := ResolveStartDir("", &Settings{DefaultProject: "~"}); got != home {
+		t.Errorf("DefaultProject \"~\" resolved to %q, want %q", got, home)
+	}
+	// And a tilde in the setting is expanded rather than looked for on disk.
+	if got := ResolveStartDir("/", &Settings{DefaultProject: "~/."}); got != home {
+		t.Errorf("a tilde in the setting resolved to %q, want %q", got, home)
+	}
+}

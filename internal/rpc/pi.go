@@ -748,7 +748,9 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 		// An empty value clears the setting and hands the decision back to the
 		// home directory, which is the point of having one: it is the fallback,
 		// not a fixed answer.
-		dir := strings.TrimSpace(req.Path)
+		// A tilde is what the settings field invites people to type, so it is
+		// expanded before the path is checked rather than after.
+		dir := settings.ExpandHome(req.Path)
 		if dir != "" {
 			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 				s.finish(req, cmd, nil, fmt.Errorf("%s is not a directory", dir))

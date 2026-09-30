@@ -84,8 +84,31 @@ type Settings struct {
 // one place a person is always willing to be. A configured directory that has
 // been deleted or moved falls through to the next candidate rather than
 // starting somewhere that is not there.
+// ExpandHome replaces a leading "~" with the home directory.
+//
+// The settings field and a shell command line both invite people to write
+// "~/Projects/thing", and a path that starts with a tilde is not a path, so
+// anything that reads one has to expand it. "$HOME/thing" is left alone: the
+// expansion a shell already did is not this function's business.
+func ExpandHome(path string) string {
+	path = strings.TrimSpace(path)
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home := homeDir()
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
+}
+
 func ResolveStartDir(requested string, set *Settings) string {
-	candidates := []string{requested, set.DefaultProject, homeDir()}
+	// The home directory is the default, so an unset setting and a setting that
+	// names the home directory mean the same thing. That is deliberate: there is
+	// no third answer to discover, and a field that reads "~/" is telling the
+	// truth about where a session will start rather than showing a blank that
+	// has to be interpreted.
+	candidates := []string{ExpandHome(requested), ExpandHome(set.DefaultProject), homeDir()}
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
 		// The filesystem root is a directory, so an existence check alone would

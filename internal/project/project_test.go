@@ -231,3 +231,86 @@ func TestAddRefusesABlankPath(t *testing.T) {
 		t.Fatalf("a refused blank path must not be recorded: %v", got)
 	}
 }
+
+func TestListPutsTheProjectYouJustUsedFirst(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvRoot, dir)
+	s := NewStore(dir)
+	real := func(name string) string {
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	a, b, c := real("a"), real("b"), real("c")
+	for _, p := range []string{a, b, c} {
+		if _, _, err := s.Add(p, "2026-01-01T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// c was used; a and b never were, so they tie and keep the order they were
+	// added in rather than reshuffling on every read.
+	if err := s.Touch(c, "2026-01-02T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || items[0].Path != c || items[1].Path != a || items[2].Path != b {
+		t.Fatalf("order = %+v, want %s first, then the never-used %s and %s in the order they were added", items, c, a, b)
+	}
+}
+
+func TestTouchDoesNotAddAProjectThatIsNotThere(t *testing.T) {
+	// Being switched to is not the same decision as being added. The store says
+	// so in a comment above its type; this is that comment, executable.
+	dir := t.TempDir()
+	t.Setenv(EnvRoot, dir)
+	s := NewStore(dir)
+	if err := s.Touch(filepath.Join(t.TempDir(), "never-added"), "2026-01-02T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Touch added a project: %+v", items)
+	}
+}
+
+func TestOrderComparesInstantsNotDigits(t *testing.T) {
+	// 10:00 at -07:00 is 17:00Z, which is later than 12:00Z. As text it sorts
+	// first, which would put the project you used most recently at the bottom.
+	dir := t.TempDir()
+	t.Setenv(EnvRoot, dir)
+	s := NewStore(dir)
+	mk := func(name string) string {
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	early, late := mk("early"), mk("late")
+	for _, p := range []string{early, late} {
+		if _, _, err := s.Add(p, "2026-01-01T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Touch(early, "2026-01-02T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Touch(late, "2026-01-02T10:00:00-07:00"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Path != late {
+		t.Fatalf("order = %+v, want %s (17:00Z) before %s (12:00Z)", items, late, early)
+	}
+}

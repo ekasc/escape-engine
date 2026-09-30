@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
+	"time"
 )
 
 // A Project is a directory the person has added to the sidebar, rather than one
@@ -18,6 +20,11 @@ type Project struct {
 	Path string `json:"path"`
 	// Added is when it was added, used only to keep the file readable.
 	Added string `json:"added,omitempty"`
+	// LastUsed is when the project was last switched to, and it is what the
+	// sidebar sorts on. The list was in the order projects were added, which
+	// buries the one you actually work in as the list grows. Empty for a project
+	// that has never been switched to, and those sort last.
+	LastUsed string `json:"lastUsed,omitempty"`
 }
 
 type file struct {
@@ -50,10 +57,13 @@ func NewStore(dir string) *Store {
 // Path is where the list is kept.
 func (s *Store) Path() string { return s.path }
 
-// List returns the added projects in the order they were added.
+// List returns the added projects, most recently used first.
 //
-// A missing file is an empty list, not an error: having added nothing yet is the
-// normal state, and it must not read as a failure.
+// A project that has never been switched to has no LastUsed and sorts after the
+// ones that have, and ties fall back to the order they were added, so the list
+// is stable rather than reshuffling on every read. A missing file is an empty
+// list, not an error: having added nothing yet is the normal state, and it must
+// not read as a failure.
 func (s *Store) List() ([]Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,7 +79,77 @@ func (s *Store) List() ([]Project, error) {
 		// A truncated or hand-edited file costs the list, not the app.
 		return nil, nil
 	}
+	sort.SliceStable(f.Projects, func(i, j int) bool {
+		return usedAfter(f.Projects[i].LastUsed, f.Projects[j].LastUsed)
+	})
 	return f.Projects, nil
+}
+
+// usedAfter compares two timestamps by instant, not by text.
+//
+// RFC3339 carries its own offset, so two valid stamps for the same moment can
+// differ in their leading digits: 10:00-07:00 is 17:00Z, which sorts before
+// 12:00Z as text and is the later of the two. Comparing the parsed instants is
+// the only thing that gets mixed offsets right. An unparseable stamp is treated
+// as never, so a hand-edited file sorts to the end rather than scrambling.
+func usedAfter(a, b string) bool {
+	at, aok := parseStamp(a)
+	bt, bok := parseStamp(b)
+	switch {
+	case aok && bok:
+		return at.After(bt)
+	case aok:
+		return true
+	case bok:
+		return false
+	default:
+		return false
+	}
+}
+
+func parseStamp(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// Touch records that a project was just used, and moves it to the front of the
+// list. A project that is not in the list is not added: being switched to is not
+// the same decision as being added, and the store says so in a comment above
+// its type.
+func (s *Store) Touch(path, usedAt string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	abs = filepath.Clean(abs)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, err := s.readLocked()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range existing {
+		if existing[i].Path == abs {
+			existing[i].LastUsed = usedAt
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	sort.SliceStable(existing, func(i, j int) bool {
+		return usedAfter(existing[i].LastUsed, existing[j].LastUsed)
+	})
+	return s.writeLocked(existing)
 }
 
 // Add records a directory, and reports whether it was newly added.

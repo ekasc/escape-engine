@@ -163,6 +163,11 @@ func NewPiServer(prov provider.Provider, ts []tools.Tool, set *settings.Settings
 	if err := s.buildAgent(sessionPath); err != nil {
 		return nil, err
 	}
+	// The project the server booted in has just been used, so it belongs at the
+	// top of the list. Without this the order would only be right in a session
+	// where you happened to switch, and a restart would drop back to whatever
+	// order the file was left in.
+	_ = s.projects.Touch(cwd, time.Now().UTC().Format(time.RFC3339))
 	return s, nil
 }
 
@@ -1444,5 +1449,10 @@ func (s *PiServer) switchProject(dir string) error {
 		restore()
 		return err
 	}
+	// Record the use so the sidebar can put the project you are in at the top.
+	// A failure to write that is not a failure to switch: the switch happened,
+	// and reporting otherwise would make a cosmetic problem look like the
+	// project could not be opened.
+	_ = s.projects.Touch(abs, time.Now().UTC().Format(time.RFC3339))
 	return nil
 }

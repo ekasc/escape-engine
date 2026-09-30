@@ -600,3 +600,66 @@ func TestAddingAProjectDoesNotTouchTheRealStore(t *testing.T) {
 		t.Fatalf("the test wrote %s/.escape/projects.json; it must not touch the real one", home)
 	}
 }
+
+// The start directory is a setting, and it has to take effect when it is set.
+// Writing it and deferring the effect to the next launch would make the UI look
+// like it had done nothing.
+func TestSetDefaultProjectSwitchesNow(t *testing.T) {
+	ts := newPiTestServer(t, nil)
+	target := t.TempDir()
+
+	ts.send(map[string]any{"type": "set_default_project", "sessionPath": target})
+	resp := ts.mustResponse("set_default_project")
+	if resp["success"] != true {
+		t.Fatalf("set_default_project = %v", resp)
+	}
+	data, _ := resp["data"].(map[string]any)
+	if got := data["defaultProject"]; got != target {
+		t.Errorf("defaultProject = %v, want %v", got, target)
+	}
+	if got := data["cwd"]; got != target {
+		t.Errorf("cwd = %v, want the setting applied at once, %v", got, target)
+	}
+
+	// And it survives, because a setting that does not survive a restart is a
+	// field, not a setting.
+	stored, err := settings.Load(settings.GlobalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DefaultProject != target {
+		t.Errorf("stored defaultProject = %q, want %q", stored.DefaultProject, target)
+	}
+}
+
+func TestSetDefaultProjectRejectsSomethingThatIsNotADirectory(t *testing.T) {
+	ts := newPiTestServer(t, nil)
+	ts.send(map[string]any{"type": "set_default_project", "sessionPath": filepath.Join(t.TempDir(), "nope")})
+	if resp := ts.mustResponse("set_default_project"); resp["success"] != false {
+		t.Fatalf("a path that is not a directory should be refused, got %v", resp)
+	}
+}
+
+// The whole point of the setting: a launch that names no directory lands in it
+// rather than in the filesystem root macOS hands a Finder-opened app.
+func TestTheRootIsNotWhereASessionStarts(t *testing.T) {
+	dir := t.TempDir()
+	want := t.TempDir()
+	t.Setenv("ESCAPE_GLOBAL_DIR", filepath.Join(dir, "global"))
+	if err := settings.WriteGlobal(map[string]any{"defaultProject": want}); err != nil {
+		t.Fatal(err)
+	}
+	// A server built the way the desktop app builds one: from the root.
+	if got := settings.ResolveStartDir("/", mustLoadGlobal(t)); got != want {
+		t.Fatalf("ResolveStartDir(\"/\") = %q, want the configured %q", got, want)
+	}
+}
+
+func mustLoadGlobal(t *testing.T) *settings.Settings {
+	t.Helper()
+	set, err := settings.Load(settings.GlobalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set
+}

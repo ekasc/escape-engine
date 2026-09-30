@@ -68,6 +68,50 @@ type Settings struct {
 	// it does not require rebuilding the provider.
 	APIEndpointBaseURL string `json:"apiEndpointBaseURL"`
 	TitleModel         string `json:"titleModel"`
+
+	// DefaultProject is where a session starts when nothing else says. It exists
+	// because macOS opens an app in the filesystem root, and the root is not a
+	// directory anyone works in. A caller that passes a real directory always
+	// wins, so this only decides the cases where there is no answer to use.
+	DefaultProject string `json:"defaultProject"`
+}
+
+// ResolveStartDir decides which directory a session should start in.
+//
+// A caller that names a real directory always wins: someone running the CLI in
+// a directory has already answered the question. Otherwise the configured
+// default is used, and the home directory is the last resort because it is the
+// one place a person is always willing to be. A configured directory that has
+// been deleted or moved falls through to the next candidate rather than
+// starting somewhere that is not there.
+func ResolveStartDir(requested string, set *Settings) string {
+	candidates := []string{requested, set.DefaultProject, homeDir()}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		// The filesystem root is a directory, so an existence check alone would
+		// accept it, and it is precisely the answer nobody means: macOS hands it
+		// to a Finder-opened app before anyone has chosen anything.
+		if candidate == "" || candidate == "/" || candidate == "." {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	// Nothing on the list exists. The current directory is the only thing left
+	// that is definitionally a directory.
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "."
+	}
+	return home
 }
 
 // Defaults returns a Settings with the documented defaults applied.

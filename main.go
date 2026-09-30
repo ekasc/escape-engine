@@ -344,10 +344,11 @@ func cmdAsk(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "escape ask: provide a task or pipe one on stdin")
 		return 2
 	}
-	if cwd == "" {
-		cwd, _ = os.Getwd()
+	cwd, set, err := startDir(cwd)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape:", err)
+		return 1
 	}
-	set, err := settings.Load(cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, "escape ask:", err)
 		return 1
@@ -456,6 +457,27 @@ func interactiveInput(input io.Reader) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
+// startDir decides which directory a command works in, and loads the settings
+// that follow from it.
+//
+// The global settings are read first because they hold defaultProject, and
+// because a caller with no directory, or the filesystem root macOS hands a
+// Finder-opened app, has not answered the question. The project settings are
+// then read for whichever directory won, so a project can still override the
+// global choice.
+func startDir(requested string) (string, *settings.Settings, error) {
+	global, err := settings.Load(settings.GlobalDir())
+	if err != nil {
+		return "", nil, err
+	}
+	dir := settings.ResolveStartDir(requested, global)
+	set, err := settings.Load(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	return dir, set, nil
+}
+
 func cmdRepl(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("repl", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -472,15 +494,12 @@ func cmdRepl(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	interactive := interactiveInput(stdin)
-	set, err := settings.Load(cwd)
+	cwd, set, err := startDir(cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, "escape repl:", err)
 		return 1
 	}
+	interactive := interactiveInput(stdin)
 	if approval == "" {
 		approval = set.ApprovalMode
 	}
@@ -884,14 +903,11 @@ func cmdServe(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
 	if sessionPath == "" {
 		fmt.Fprintln(stderr, "escape serve: --session PATH is required")
 		return 2
 	}
-	set, err := settings.Load(cwd)
+	cwd, set, err := startDir(cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, "escape serve:", err)
 		return 1
@@ -988,10 +1004,11 @@ func cmdRPC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if cwd == "" {
-		cwd, _ = os.Getwd()
+	cwd, set, err := startDir(cwd)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape:", err)
+		return 1
 	}
-	set, err := settings.Load(cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, "escape rpc:", err)
 		return 1
@@ -1065,10 +1082,11 @@ func cmdDiagnostics(args []string, stdout, stderr io.Writer) int {
 	if prompt == "" {
 		prompt = "Reply with exactly the word: ready"
 	}
-	if cwd == "" {
-		cwd, _ = os.Getwd()
+	cwd, set, err := startDir(cwd)
+	if err != nil {
+		fmt.Fprintln(stderr, "escape:", err)
+		return 1
 	}
-	set, err := settings.Load(cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, "escape diagnostics:", err)
 		return 1

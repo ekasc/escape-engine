@@ -744,6 +744,37 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 		}
 		s.set.APIEndpointBaseURL = baseURL
 		s.finish(req, cmd, map[string]any{"apiEndpointBaseURL": baseURL}, nil)
+	case "set_default_project":
+		// An empty value clears the setting and hands the decision back to the
+		// home directory, which is the point of having one: it is the fallback,
+		// not a fixed answer.
+		dir := strings.TrimSpace(req.Path)
+		if dir != "" {
+			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+				s.finish(req, cmd, nil, fmt.Errorf("%s is not a directory", dir))
+				return
+			}
+			abs, err := filepath.Abs(dir)
+			if err != nil {
+				s.finish(req, cmd, nil, err)
+				return
+			}
+			dir = abs
+		}
+		if err := settings.WriteGlobal(map[string]any{"defaultProject": dir}); err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		s.set.DefaultProject = dir
+		// Switch now rather than at the next launch. Waiting would leave the
+		// setting looking like it had done nothing until the app was reopened.
+		if dir != "" {
+			if err := s.switchProject(dir); err != nil {
+				s.finish(req, cmd, nil, err)
+				return
+			}
+		}
+		s.finish(req, cmd, map[string]any{"defaultProject": dir, "cwd": s.cwd}, nil)
 	case "set_title_model":
 		model := strings.TrimSpace(req.Model)
 		if model != "" {
@@ -1175,6 +1206,9 @@ func (s *PiServer) getState() map[string]any {
 		// actually in force, rather than the one it last wrote to disk.
 		"apiEndpointBaseURL": s.set.APIEndpointBaseURL,
 		"titleModel":         s.set.TitleModel,
+		// Reported so the settings screen opens on the value in force rather
+		// than an empty field.
+		"defaultProject": s.set.DefaultProject,
 	}
 	if info != nil {
 		m["sessionName"] = info.Name

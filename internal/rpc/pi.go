@@ -917,22 +917,6 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 		}
 		err := session.ExportHTML(s.store.Path(), out)
 		s.finish(req, cmd, map[string]any{"path": out}, err)
-	case "search_dirs":
-		// A fuzzy walk, not a path completion: the root is optional and the
-		// query is matched against directory names anywhere in the tree.
-		dirs, err := session.SearchDirs(req.Path, req.Query, req.Depth, req.Limit)
-		if err != nil {
-			s.finish(req, cmd, nil, err)
-			return
-		}
-		s.finish(req, cmd, map[string]any{"directories": dirs, "root": req.Path}, nil)
-	case "complete_path":
-		completions, err := session.CompletePath(req.Path, s.cwd)
-		if err != nil {
-			s.finish(req, cmd, nil, err)
-			return
-		}
-		s.finish(req, cmd, map[string]any{"completions": completions}, nil)
 	case "copy_to_clipboard":
 		err := copyToClipboard(req.Message)
 		s.finish(req, cmd, map[string]any{}, err)
@@ -1017,11 +1001,18 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 		list, listErr := s.projects.List()
 		s.finish(req, cmd, map[string]any{"projects": list, "current": s.cwd}, listErr)
 	case "add_project":
-		if strings.TrimSpace(req.Path) == "" {
-			s.finish(req, cmd, nil, errors.New("a project path is required"))
+		// A person types "~/Projects/escape" or "Projects/escape" and means a
+		// directory, so this resolves what it was given rather than insisting on
+		// an absolute path. The engine is the only thing that can: expanding a
+		// tilde and resolving a relative path against the start directory are
+		// filesystem facts, and doing them in the shell too would be two
+		// implementations that drift.
+		dir, resolveErr := s.resolveProjectPath(req.Path)
+		if resolveErr != nil {
+			s.finish(req, cmd, nil, resolveErr)
 			return
 		}
-		entry, added, addErr := s.projects.Add(req.Path, time.Now().Format(time.RFC3339))
+		entry, added, addErr := s.projects.Add(dir, time.Now().Format(time.RFC3339))
 		if addErr != nil {
 			s.finish(req, cmd, nil, addErr)
 			return
@@ -1351,6 +1342,41 @@ func (s *PiServer) diagnosticsSnapshot() diagnostics.Snapshot {
 // settings that cascade from the project's own .escape directory. Rebinding only
 // some of them is how an agent ends up editing one project while the model is
 // told about another, so they are rebound together or not at all.
+// resolveProjectPath turns what a person typed into a directory that exists.
+//
+// A tilde is expanded, a relative path is taken from the start directory rather
+// than from wherever the process happens to be, and the result is absolute so
+// the project store holds one spelling of a directory. It is refused rather than
+// guessed at when it does not name a directory, because a project that is not
+// there fails later and further from the cause.
+func (s *PiServer) resolveProjectPath(raw string) (string, error) {
+	typed := settings.ExpandHome(raw)
+	if typed == "" {
+		return "", errors.New("a project path is required")
+	}
+	if !filepath.IsAbs(typed) {
+		// The start directory, not the process directory: a Finder-opened app
+		// has "/" and resolving against that would produce "/Projects/escape".
+		base := s.set.DefaultProject
+		if base == "" {
+			base = s.cwd
+		}
+		typed = filepath.Join(settings.ExpandHome(base), typed)
+	}
+	typed = filepath.Clean(typed)
+	info, err := os.Stat(typed)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("%s does not exist", typed)
+		}
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", typed)
+	}
+	return typed, nil
+}
+
 func (s *PiServer) switchProject(dir string) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {

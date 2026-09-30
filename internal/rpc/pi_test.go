@@ -663,3 +663,75 @@ func mustLoadGlobal(t *testing.T) *settings.Settings {
 	}
 	return set
 }
+
+// A person types a path, not an absolute one. "~/Projects/escape" and
+// "Projects/escape" both have to name a directory that exists.
+func TestAddProjectResolvesWhatWasTyped(t *testing.T) {
+	ts := newPiTestServer(t, nil)
+	start := t.TempDir()
+	real := filepath.Join(start, "engine")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ts.send(map[string]any{"type": "set_default_project", "sessionPath": start})
+	ts.mustResponse("set_default_project")
+
+	cases := []struct {
+		name  string
+		typed string
+		want  string
+	}{
+		{"a relative path is taken from the start directory", "engine", real},
+		{"a trailing separator is the same directory", "engine/", real},
+		// The temp directory is not under the home directory, so the only tilde
+		// case that names something real is the home directory itself. The
+		// project store is redirected, so adding it touches nothing.
+		{"a tilde is expanded", "~", mustHome(t)},
+		{"a dot segment is resolved", "./engine", real},
+		{"an absolute path is used as given", real, real},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts.send(map[string]any{"type": "add_project", "sessionPath": tc.typed})
+			resp := ts.mustResponse("add_project")
+			if resp["success"] != true {
+				t.Fatalf("add_project(%q) = %v", tc.typed, resp)
+			}
+			data, _ := resp["data"].(map[string]any)
+			entry, _ := data["project"].(map[string]any)
+			if entry["path"] != tc.want {
+				t.Errorf("add_project(%q) stored %v, want %q", tc.typed, entry["path"], tc.want)
+			}
+		})
+	}
+}
+
+func TestAddProjectRefusesSomethingThatIsNotADirectory(t *testing.T) {
+	ts := newPiTestServer(t, nil)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts.send(map[string]any{"type": "add_project", "sessionPath": file})
+	if resp := ts.mustResponse("add_project"); resp["success"] != false {
+		t.Fatalf("a file is not a project: %v", resp)
+	}
+	ts.send(map[string]any{"type": "add_project", "sessionPath": filepath.Join(dir, "nope")})
+	if resp := ts.mustResponse("add_project"); resp["success"] != false {
+		t.Fatalf("a path that does not exist is not a project: %v", resp)
+	}
+	ts.send(map[string]any{"type": "add_project", "sessionPath": "  "})
+	if resp := ts.mustResponse("add_project"); resp["success"] != false {
+		t.Fatalf("an empty path is not a project: %v", resp)
+	}
+}
+
+func mustHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return home
+}

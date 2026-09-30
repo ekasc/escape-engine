@@ -112,7 +112,17 @@ func SessionRoot(value string) string {
 // GlobalDir returns the global configuration root. Escape keeps its own tree
 // rather than sharing another tool's, so this is ~/.escape: its own settings,
 // sessions, skills, and context files, and nothing of anyone else's.
+// GlobalDir is where projects, skills and the settings file live.
+//
+// ESCAPE_GLOBAL_DIR overrides it, for the same reason ESCAPE_SESSIONS_DIR
+// exists: a test that adds a project writes to the real store otherwise, and the
+// damage is not visible from the test that caused it. It shows up later as
+// projects in the sidebar that nobody added, pointing at temporary directories
+// that no longer exist.
 func GlobalDir() string {
+	if dir := os.Getenv("ESCAPE_GLOBAL_DIR"); dir != "" {
+		return dir
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		home = "."

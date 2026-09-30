@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,6 +51,10 @@ func newPiTestServer(t *testing.T, handler func(ctx context.Context, req provide
 		handler = fakePiHandler
 	}
 	dir := t.TempDir()
+	// The project store, the settings file and the skills all live in the global
+	// dir. Without this, a test that adds a project writes the user's real
+	// ~/.escape/projects.json and the entry turns up in their sidebar later.
+	t.Setenv("ESCAPE_GLOBAL_DIR", filepath.Join(dir, "global"))
 	root := filepath.Join(dir, "sessions")
 	sessionPath, err := session.NewPath(root, dir)
 	if err != nil {
@@ -572,5 +577,26 @@ func TestPiCompact(t *testing.T) {
 	}
 	if summary, _ := data["summary"].(string); summary == "" {
 		t.Errorf("compact summary empty: %#v", data)
+	}
+}
+
+// A test that adds a project used to write the user's real
+// ~/.escape/projects.json, and the entry surfaced later in their sidebar as a
+// project they never added, pointing at a temporary directory. The test passed
+// and the damage showed up in the app, hours later, in a different repository.
+func TestAddingAProjectDoesNotTouchTheRealStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ESCAPE_GLOBAL_DIR", "")
+
+	ts := newPiTestServer(t, nil)
+	other := t.TempDir()
+	ts.send(map[string]any{"type": "add_project", "sessionPath": other})
+	if resp := ts.mustResponse("add_project"); resp["success"] != true {
+		t.Fatalf("add_project = %v", resp)
+	}
+
+	if _, err := os.Stat(filepath.Join(home, ".escape", "projects.json")); !os.IsNotExist(err) {
+		t.Fatalf("the test wrote %s/.escape/projects.json; it must not touch the real one", home)
 	}
 }

@@ -19,10 +19,10 @@ type ToolCall struct {
 	Args map[string]any
 }
 
-// Image is one image attachment in a message. OpenAI-compatible providers
-// send it as an image_url content part; the ChatGPT provider (see chatgpt.go)
-// ignores it — its wireInput only serializes Text, so image messages fall
-// back to the text-only representation and still work.
+// Image is one image attachment in a message. Both provider wires serialize it:
+// OpenAI-compatible providers send an image_url content part and the ChatGPT
+// provider an input_image block. Whether it is attached at all is decided before
+// the wire is built, from the model's declared input modality.
 type Image struct {
 	MimeType string // e.g. "image/png"
 	Data     []byte // raw image bytes

@@ -262,7 +262,7 @@ func estimateMessageTokens(m *Message) int {
 			switch b.Type {
 			case BlockText:
 				chars += len([]rune(b.Text))
-			case BlockImage:
+			case BlockImage, BlockMedia:
 				chars += 4800
 			}
 		}

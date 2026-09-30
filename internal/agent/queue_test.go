@@ -36,7 +36,7 @@ func TestFollowUpQueue(t *testing.T) {
 	ch := ag.Events()
 	defer ag.Unsubscribe(ch)
 
-	if _, err := ag.Send("first"); err != nil {
+	if _, err := ag.Send("first", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ag.FollowUp("second"); err != nil {
@@ -75,7 +75,7 @@ func TestRetryDisabled(t *testing.T) {
 		return nil, &provider.RetryableError{Status: 503, Msg: "boom"}
 	}
 
-	if _, err := ag.Send("x"); err != nil {
+	if _, err := ag.Send("x", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonError)

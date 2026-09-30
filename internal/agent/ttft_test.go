@@ -55,7 +55,7 @@ func TestFirstMessageDoesNotWaitForTheSessionTitle(t *testing.T) {
 	}()
 
 	t0 := time.Now()
-	if _, err := a.Send("hello"); err != nil {
+	if _, err := a.Send("hello", nil); err != nil {
 		t.Fatal(err)
 	}
 	ttft := (<-firstToken).Sub(t0)
@@ -106,7 +106,7 @@ func TestOnlyTheFirstMessageTriggersNaming(t *testing.T) {
 	}()
 
 	for i := 0; i < 3; i++ {
-		if _, err := a.Send("message"); err != nil {
+		if _, err := a.Send("message", nil); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(80 * time.Millisecond)

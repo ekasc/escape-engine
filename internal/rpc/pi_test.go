@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ekasc/escape-engine/internal/agent"
 	"github.com/ekasc/escape-engine/internal/provider"
 	"github.com/ekasc/escape-engine/internal/session"
 	"github.com/ekasc/escape-engine/internal/settings"
@@ -191,7 +192,54 @@ func TestPiPrompt(t *testing.T) {
 	}
 }
 
+// The shell cannot find turn boundaries without them, and it treats a stopped
+// turn as a different outcome from a failed one. Both facts ride on the wire,
+// so both are asserted here rather than assumed to survive the emit mapping.
+func TestPiTurnLifecycleCarriesTurnIdentity(t *testing.T) {
+	ts := newPiTestServer(t, nil)
 
+	ts.send(map[string]any{"type": "prompt", "message": "hello"})
+	lines := ts.readUntil(func(o map[string]any) bool { return o["type"] == "agent_settled" })
+
+	var startID, endID string
+	var endState, endReason string
+	for _, l := range lines {
+		switch l["type"] {
+		case "turn_start":
+			startID, _ = l["turnId"].(string)
+		case "turn_end":
+			endID, _ = l["turnId"].(string)
+			endState, _ = l["state"].(string)
+			endReason, _ = l["reason"].(string)
+		}
+	}
+	if startID == "" {
+		t.Error("turn_start carried no turnId; the shell has to invent turn boundaries without it")
+	}
+	if endID != startID {
+		t.Errorf("turn_end turnId = %q, want the turn_start id %q", endID, startID)
+	}
+	if endState != "completed" {
+		t.Errorf("turn_end state = %q, want %q", endState, "completed")
+	}
+	if endReason == "" {
+		t.Error("turn_end carried no reason")
+	}
+}
+
+// turnEndState is the mapping the shell's three outcomes depend on.
+func TestTurnEndState(t *testing.T) {
+	for _, tc := range []struct{ reason, want string }{
+		{agent.ReasonDone, "completed"},
+		{agent.ReasonStopped, "interrupted"},
+		{agent.ReasonError, "error"},
+		{"something-new", "completed"},
+	} {
+		if got := turnEndState(tc.reason); got != tc.want {
+			t.Errorf("turnEndState(%q) = %q, want %q", tc.reason, got, tc.want)
+		}
+	}
+}
 
 func TestPiGetState(t *testing.T) {
 	ts := newPiTestServer(t, nil)

@@ -240,7 +240,7 @@ func TestTUIQueuesWhileBusy(t *testing.T) {
 	})
 	events := ag.Events()
 	defer ag.Unsubscribe(events)
-	if _, err := ag.Send("first prompt"); err != nil {
+	if _, err := ag.Send("first prompt", nil); err != nil {
 		t.Fatal(err)
 	}
 	select {

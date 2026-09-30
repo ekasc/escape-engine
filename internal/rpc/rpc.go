@@ -156,7 +156,7 @@ func (s *Server) dispatch(ctx context.Context, req request) {
 			s.writeError(req.ID, codeInvalid, "invalid params: "+err.Error())
 			return
 		}
-		turnID, err := s.agent.Send(p.Text)
+		turnID, err := s.agent.Send(p.Text, nil)
 		if err != nil {
 			s.writeError(req.ID, codeInternal, err.Error())
 			return

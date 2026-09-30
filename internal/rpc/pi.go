@@ -18,6 +18,7 @@ import (
 	"bytes"
 
 	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/design"
 	"github.com/ekasc/escape-engine/internal/diagnostics"
 	"github.com/ekasc/escape-engine/internal/memory"
 	"github.com/ekasc/escape-engine/internal/project"
@@ -26,6 +27,7 @@ import (
 	"github.com/ekasc/escape-engine/internal/session"
 	"github.com/ekasc/escape-engine/internal/settings"
 	"github.com/ekasc/escape-engine/internal/tools"
+	"github.com/ekasc/escape-engine/internal/vcs"
 )
 
 // PiServer implements pi's command/event JSON-lines RPC protocol:
@@ -66,6 +68,11 @@ type PiServer struct {
 
 	bashMu  sync.Mutex
 	bashCmd *exec.Cmd
+
+	// design runs the Design Mode loop. It is nil until a server is built, and
+	// the command layer checks before use rather than assuming, because a run
+	// outlives the turn it was started from.
+	design *design.Service
 }
 
 type piRequest struct {
@@ -85,7 +92,6 @@ type piRequest struct {
 	Cwd        string   `json:"cwd"`
 	EntryID    string   `json:"entryId"`
 	Since      string   `json:"since"`
-	Limit      int      `json:"limit"`
 	FromID     string   `json:"fromId"`
 	TargetID   string   `json:"targetId"`
 	Answer     string   `json:"answer"`
@@ -95,6 +101,16 @@ type piRequest struct {
 	Path       string   `json:"sessionPath"`
 	Output     string   `json:"outputPath"`
 	Paths      []string `json:"paths"`
+	FilePath   string   `json:"filePath"`
+	BaseURL    string   `json:"baseURL"`
+	Query      string   `json:"query"`
+	Depth      int      `json:"depth"`
+	Limit      int      `json:"limit"`
+
+	// DesignRequest is the brief a Design Mode run works from, and
+	// DesignSiteDir is the site to capture when it is not the current project.
+	DesignRequest string `json:"designRequest"`
+	DesignSiteDir string `json:"designSiteDir"`
 
 	Enabled            *bool  `json:"enabled"`
 	CustomInstructions string `json:"customInstructions"`
@@ -142,6 +158,7 @@ func NewPiServer(prov provider.Provider, ts []tools.Tool, set *settings.Settings
 		loader:         resources.New(cwd, set),
 		projects:       project.NewStore(settings.GlobalDir()),
 		buildTools:     buildTools,
+		design:         design.NewService(),
 	}
 	if err := s.buildAgent(sessionPath); err != nil {
 		return nil, err
@@ -540,7 +557,10 @@ func (s *PiServer) translate(ev agent.Event) {
 	case agent.EventAgentStart:
 		s.emit(map[string]any{"type": "agent_start"})
 	case agent.EventTurnStarted:
-		s.emit(map[string]any{"type": "turn_start"})
+		// The turn id rides on both boundaries. The shell groups transcript
+		// rows by turn, and a provider that emits commentary between tool calls
+		// makes any guess from message order wrong.
+		s.emit(map[string]any{"type": "turn_start", "turnId": ev.TurnID})
 	case agent.EventMessageStart:
 		if ev.Role == session.RoleAssistant {
 			s.emit(map[string]any{"type": "message_start"})
@@ -556,14 +576,28 @@ func (s *PiServer) translate(ev agent.Event) {
 				m["model"] = ev.Model
 			}
 			s.emit(m)
+			return
 		}
+		// The user's message_end carries the attachments, so the picture is on
+		// screen as soon as it is sent rather than only after the transcript is
+		// read back off disk.
+		m := map[string]any{"type": "message_end", "messageId": ev.MessageID}
+		if len(ev.Attachments) > 0 {
+			m["attachments"] = ev.Attachments
+		}
+		s.emit(m)
 	case agent.EventToolCall:
 		s.emit(map[string]any{"type": "tool_execution_start", "toolCallId": ev.ToolCallID, "toolName": ev.Name, "args": ev.Args})
 	case agent.EventToolResult:
 		s.emit(map[string]any{"type": "tool_execution_end", "toolCallId": ev.ToolCallID, "toolName": ev.Name,
 			"result": map[string]any{"content": []any{map[string]any{"type": "text", "text": ev.Output}}, "details": map[string]any{}}, "isError": ev.Error})
 	case agent.EventTurnEnd:
-		s.emit(map[string]any{"type": "turn_end"})
+		// state is the shell's three outcomes, not the engine's free-form
+		// reason, so a stopped turn is distinguishable from a failed one.
+		s.emit(map[string]any{
+			"type": "turn_end", "turnId": ev.TurnID,
+			"state": turnEndState(ev.Reason), "reason": ev.Reason,
+		})
 	case agent.EventAgentEnd:
 		s.emit(map[string]any{"type": "agent_end"})
 	case agent.EventSettled:
@@ -639,7 +673,7 @@ func (s *PiServer) Serve(ctx context.Context, in io.Reader) error {
 func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 	switch cmd {
 	case "prompt":
-		turnID, err := s.agent.Send(req.Message)
+		turnID, err := s.agent.Send(req.Message, nil)
 		s.finish(req, cmd, map[string]any{"turnId": turnID}, err)
 	case "steer":
 		turnID, err := s.agent.QueueSteer(req.Text)
@@ -680,6 +714,43 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 		}
 		err := provider.SaveOpenCodeKey(req.Provider, req.APIKey)
 		s.finish(req, cmd, map[string]any{"provider": req.Provider}, err)
+	case "remove_api_key":
+		if req.Provider != "opencode-go" && req.Provider != "opencode-zen" {
+			s.finish(req, cmd, nil, fmt.Errorf("API-key login is supported for opencode-go and opencode-zen"))
+			return
+		}
+		s.finish(req, cmd, map[string]any{"provider": req.Provider}, provider.RemoveOpenCodeKey(req.Provider))
+	case "set_api_endpoint":
+		// The endpoint and its key are written together, because a custom
+		// endpoint with no credential is a request that cannot succeed and a
+		// failure that looks like a network problem.
+		baseURL := strings.TrimSpace(req.BaseURL)
+		if baseURL == "" {
+			s.finish(req, cmd, nil, fmt.Errorf("an endpoint URL is required"))
+			return
+		}
+		if err := settings.WriteGlobal(map[string]any{
+			"apiEndpointBaseURL": baseURL,
+			"defaultProvider":    "openai",
+		}); err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		if key := strings.TrimSpace(req.APIKey); key != "" {
+			if err := provider.SaveOpenCodeKey("openai", key); err != nil {
+				s.finish(req, cmd, nil, err)
+				return
+			}
+		}
+		s.set.APIEndpointBaseURL = baseURL
+		s.finish(req, cmd, map[string]any{"apiEndpointBaseURL": baseURL}, nil)
+	case "set_title_model":
+		model := strings.TrimSpace(req.Model)
+		if model != "" {
+			s.set.TitleModel = model
+		}
+		s.agent.SetTitleModel(model)
+		s.finish(req, cmd, map[string]any{"titleModel": model}, nil)
 	case "set_approval_mode":
 		if req.Mode != "auto" && req.Mode != "ask" {
 			s.finish(req, cmd, nil, fmt.Errorf("approval mode must be auto or ask"))
@@ -813,6 +884,51 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 		}
 		err := session.ExportHTML(s.store.Path(), out)
 		s.finish(req, cmd, map[string]any{"path": out}, err)
+	case "search_dirs":
+		// A fuzzy walk, not a path completion: the root is optional and the
+		// query is matched against directory names anywhere in the tree.
+		dirs, err := session.SearchDirs(req.Path, req.Query, req.Depth, req.Limit)
+		if err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		s.finish(req, cmd, map[string]any{"directories": dirs, "root": req.Path}, nil)
+	case "complete_path":
+		completions, err := session.CompletePath(req.Path, s.cwd)
+		if err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		s.finish(req, cmd, map[string]any{"completions": completions}, nil)
+	case "copy_to_clipboard":
+		err := copyToClipboard(req.Message)
+		s.finish(req, cmd, map[string]any{}, err)
+	case "vcs_status":
+		// Not a repository is an empty state rather than a failure, so Read
+		// reports it and this reports it back instead of erroring.
+		st, err := vcs.Read(s.cwd)
+		if err != nil {
+			s.finish(req, cmd, nil, err)
+			return
+		}
+		s.finish(req, cmd, map[string]any{
+			"isRepo": st.IsRepo, "refName": st.RefName, "hasChanges": st.HasChanges,
+			"staged": st.Staged, "unstaged": st.Unstaged,
+			"insertions": st.Insertions, "deletions": st.Deletions,
+		}, nil)
+	case "vcs_file_diff":
+		diff, err := vcs.FileDiff(s.cwd, req.FilePath)
+		s.finish(req, cmd, map[string]any{"diff": diff}, err)
+	case "vcs_stage":
+		s.finish(req, cmd, map[string]any{}, vcs.Stage(s.cwd, req.Paths...))
+	case "vcs_unstage":
+		s.finish(req, cmd, map[string]any{}, vcs.Unstage(s.cwd, req.Paths...))
+	case "vcs_commit":
+		s.finish(req, cmd, map[string]any{}, vcs.Commit(s.cwd, req.Message, req.Paths...))
+	case "design_start":
+		s.startDesign(req, cmd)
+	case "design_cancel":
+		s.cancelDesign(req, cmd)
 	case "list_sessions":
 		// ListForCwd probes each session header and only pays the full read for
 		// this project, rather than reading every session in the store and
@@ -1055,6 +1171,10 @@ func (s *PiServer) getState() map[string]any {
 		"approvalMode":  st.ApprovalMode,
 		"maxTokens":     s.agent.MaxTokens(),
 		"state":         st.State,
+		// Reported back so the settings screen shows the endpoint that is
+		// actually in force, rather than the one it last wrote to disk.
+		"apiEndpointBaseURL": s.set.APIEndpointBaseURL,
+		"titleModel":         s.set.TitleModel,
 	}
 	if info != nil {
 		m["sessionName"] = info.Name

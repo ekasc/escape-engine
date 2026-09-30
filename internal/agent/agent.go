@@ -53,10 +53,13 @@ type Options struct {
 	Store    *session.Store
 	Provider provider.Provider
 	// SpillDir receives full tool output that was too large to keep inline.
-	SpillDir              string
-	Tools                 []tools.Tool
-	Cwd                   string
-	Model                 string
+	SpillDir string
+	Tools    []tools.Tool
+	Cwd      string
+	Model    string
+	// TitleModel names the model used for thread titles and other generated
+	// text. Empty means the current chat model.
+	TitleModel            string
 	SystemPrompt          string
 	MaxIterations         int // per-turn tool loop guard
 	MaxRetries            int // bounded provider retries
@@ -201,7 +204,11 @@ func (a *Agent) State() TurnInfo {
 // Send starts a turn with the given user text. It returns immediately with
 // the turn id; events (message_start/delta/end, tool_call, agent_settled)
 // arrive on Events(). Returns ErrBusy if a turn is already running.
-func (a *Agent) Send(text string) (string, error) {
+// Send starts a turn from the user's text plus any files they dropped on the
+// composer. Attachments are read here rather than handed over as bytes so the
+// size limit sits next to the context-window sizes it exists to protect; see
+// readAttachment.
+func (a *Agent) Send(text string, attachments []string) (string, error) {
 	a.mu.Lock()
 	if a.state == StateRunning {
 		a.mu.Unlock()
@@ -219,7 +226,7 @@ func (a *Agent) Send(text string) (string, error) {
 	a.cancel = cancel
 	a.mu.Unlock()
 
-	go a.runTurn(ctx, text)
+	go a.runTurn(ctx, text, attachments)
 	return a.turnID, nil
 }
 
@@ -242,6 +249,14 @@ func (a *Agent) SetMaxTokens(maxTokens int) {
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	a.opts.Model = model
+	a.mu.Unlock()
+}
+
+// SetTitleModel changes the model used for thread titles. Empty falls back
+// to the current chat model.
+func (a *Agent) SetTitleModel(model string) {
+	a.mu.Lock()
+	a.opts.TitleModel = model
 	a.mu.Unlock()
 }
 
@@ -345,7 +360,7 @@ func (a *Agent) Steer(text string) (string, error) {
 	if ch != nil {
 		<-ch
 	}
-	return a.Send(text)
+	return a.Send(text, nil)
 }
 
 // Wait blocks until the current turn settles (no-op when idle).
@@ -375,7 +390,7 @@ func (a *Agent) queueMessage(text string, steer bool) (string, error) {
 	a.mu.Lock()
 	if a.state == StateIdle {
 		a.mu.Unlock()
-		return a.Send(text)
+		return a.Send(text, nil)
 	}
 	if steer {
 		a.steerQueue = append(a.steerQueue, text)
@@ -420,7 +435,7 @@ func (a *Agent) deliverQueued() {
 	followUp := append([]string(nil), a.followUpQueue...)
 	a.mu.Unlock()
 	a.publish(Event{Event: EventQueueUpdate, Steering: steering, FollowUp: followUp})
-	_, _ = a.Send(text)
+	_, _ = a.Send(text, nil)
 }
 
 func (a *Agent) publish(ev Event) { a.bus.Publish(ev) }
@@ -446,7 +461,7 @@ func (a *Agent) settle(reason string) {
 }
 
 // runTurn executes one full send -> model -> tools -> settle cycle.
-func (a *Agent) runTurn(ctx context.Context, text string) {
+func (a *Agent) runTurn(ctx context.Context, text string, attachments []string) {
 	turnID := a.currentTurnID()
 	a.publish(Event{Event: EventAgentStart, TurnID: turnID})
 	a.publish(Event{Event: EventTurnStarted, TurnID: turnID, Text: text})
@@ -478,10 +493,30 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 		a.diag.Record(phase)
 	}()
 
-	// 1. Persist the user message.
+	// 1. Persist the user message, with whatever they dropped on the composer
+	// attached after the text.
+	//
+	// A file that could not be read is reported and skipped rather than
+	// failing the turn: dropping four screenshots and having one of them be a
+	// symlink to nothing should still send the other three.
+	blocks := make([]session.Block, 0, len(attachments)+1)
+	if strings.TrimSpace(text) != "" {
+		blocks = append(blocks, session.Block{Type: session.BlockText, Text: text})
+	}
+	attached, notes := attachmentBlocks(attachments)
+	blocks = append(blocks, attached...)
+	for _, note := range notes {
+		a.publish(Event{Event: EventError, Message: note})
+	}
+	if len(blocks) == 0 {
+		a.publish(Event{Event: EventError, Message: "nothing to send"})
+		a.settle(ReasonError)
+		return
+	}
+
 	userMsg := &session.Message{
 		Role:      session.RoleUser,
-		Content:   []session.Block{{Type: session.BlockText, Text: text}},
+		Content:   blocks,
 		Timestamp: session.NowMillis(),
 	}
 	userEntry, err := a.opts.Store.Append(session.Entry{Type: session.TypeMessage, Message: userMsg})
@@ -490,7 +525,11 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 		a.settle(ReasonError)
 		return
 	}
-	a.publish(Event{Event: EventMessageEnd, TurnID: turnID, Role: session.RoleUser, MessageID: userEntry.ID, Timestamp: userMsg.Timestamp})
+	a.publish(Event{
+		Event: EventMessageEnd, TurnID: turnID, Role: session.RoleUser,
+		MessageID: userEntry.ID, Timestamp: userMsg.Timestamp,
+		Attachments: eventAttachments(blocks),
+	})
 
 	// 2. Auto-name once per session: if no title exists yet, ask the provider
 	// for one and persist it as a session_info entry (best-effort).
@@ -564,7 +603,7 @@ func (a *Agent) runTurn(ctx context.Context, text string) {
 			return
 		}
 		buildAt := time.Now()
-		hist, err := messagesFromEntries(entries, a.systemPrompt)
+		hist, err := messagesFromEntries(entries, a.systemPrompt, a.opts.Model)
 		if err != nil {
 			a.publish(Event{Event: EventError, Message: fmt.Sprintf("failed to build history: %v", err)})
 			a.settle(ReasonError)
@@ -928,8 +967,13 @@ func (a *Agent) runOneTool(ctx context.Context, turnID string, tc provider.ToolC
 	// file the model is told how to search. Keeping it whole costs a session a
 	// megabyte of disk and the same again in the parsed history cache, for
 	// output that is stale the moment the turn moves on.
+	//
+	// An image result is exempt. Its payload is one base64 line, so a truncation
+	// cuts it at an arbitrary offset and the remainder decodes to noise, while
+	// the spilled copy is a text file the model has no way to turn back into an
+	// image. Half an image is worth less than the whole session costs.
 	stored := res.Output
-	if !instructionShapedTool(tc.Name) {
+	if !instructionShapedTool(tc.Name) && !strings.HasPrefix(res.Output, tools.ImageOutputPrefix) {
 		name := fmt.Sprintf("%s-%s.txt", a.opts.Store.ID(), tc.ID)
 		stored, _, _ = session.SpillToolOutput(res.Output, a.opts.SpillDir, name)
 	}
@@ -975,8 +1019,11 @@ func (a *Agent) currentTurnID() string {
 
 // callText makes a bounded meta-call (no tools, no retries, no events) and
 // returns the concatenated text. Used for naming and recap.
-func (a *Agent) callText(ctx context.Context, messages []provider.Message, maxTokens int) (string, error) {
-	req := provider.Request{Model: a.opts.Model, Messages: messages, MaxTokens: maxTokens}
+func (a *Agent) callText(ctx context.Context, model string, messages []provider.Message, maxTokens int) (string, error) {
+	if model == "" {
+		model = a.opts.Model
+	}
+	req := provider.Request{Model: model, Messages: messages, MaxTokens: maxTokens}
 	stream, err := a.opts.Provider.Stream(ctx, req)
 	if err != nil {
 		return "", err
@@ -1035,7 +1082,7 @@ func stripThinking(s string) string {
 func (a *Agent) nameSession(ctx context.Context, text, parentID string) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := a.callText(ctx, []provider.Message{
+	out, err := a.callText(ctx, a.opts.TitleModel, []provider.Message{
 		{Role: "system", Text: NamingSystemPrompt},
 		{Role: "user", Text: text},
 	}, 200)
@@ -1061,7 +1108,7 @@ func (a *Agent) Recap(ctx context.Context) (string, error) {
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := a.callText(ctx, []provider.Message{
+	out, err := a.callText(ctx, "", []provider.Message{
 		{Role: "system", Text: RecapSystemPrompt},
 		{Role: "user", Text: recentMessages(entries, 20)},
 	}, 300)
@@ -1169,10 +1216,20 @@ func toSessionUsage(u provider.Usage) *session.Usage {
 }
 
 // Model is the model the next request will use.
+// Model is the model id subsequent turns use.
 func (a *Agent) Model() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.opts.Model
+}
+
+// SessionPath is the transcript file backing this agent. A caller that needs to
+// read back what a turn produced reads the transcript rather than the event bus,
+// because the bus drops events for a subscriber that falls behind.
+func (a *Agent) SessionPath() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.opts.Store.Path()
 }
 
 // ToolCount is how many tools a request carries.

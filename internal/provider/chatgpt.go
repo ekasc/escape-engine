@@ -159,14 +159,30 @@ func wireInput(msgs []Message) []map[string]any {
 			}
 			out = append(out, w)
 		default: // "user", "system"
+			content := []any{map[string]any{"type": "input_text", "text": m.Text}}
+			for _, im := range wireImages(m) {
+				content = append(content, map[string]any{
+					"type":      "input_image",
+					"image_url": im.DataURI(),
+				})
+			}
 			out = append(out, map[string]any{
 				"type":    "message",
 				"role":    m.Role,
-				"content": []any{map[string]any{"type": "input_text", "text": m.Text}},
+				"content": content,
 			})
 		}
 	}
 	return out
+}
+
+// wireImages collects a message's images in the order they were attached. The
+// singular Image field, when set, is the one that came first.
+func wireImages(m Message) []*Image {
+	if m.Image == nil {
+		return m.Images
+	}
+	return append([]*Image{m.Image}, m.Images...)
 }
 
 // wireResponsesTools translates ToolSpecs into Responses `tools` items.

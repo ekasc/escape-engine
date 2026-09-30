@@ -18,6 +18,7 @@ import (
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/ekasc/escape-engine/internal/agent"
+	"github.com/ekasc/escape-engine/internal/design"
 	"github.com/ekasc/escape-engine/internal/resources"
 	"github.com/ekasc/escape-engine/internal/session"
 	"github.com/ekasc/escape-engine/internal/settings"
@@ -109,6 +110,13 @@ type tuiModel struct {
 	suggestionsInitialized bool
 	loginForm              *huh.Form
 	loginSelection         string
+
+	// design runs the Design Mode loop, and post is the only thread-safe way
+	// into the event loop, which is what a run's own goroutine needs. It is set
+	// once the program exists, so a run started before then has nowhere to
+	// report and pumpDesign declines rather than blocking.
+	design *design.Service
+	post   func(tea.Msg)
 }
 
 type tuiEventMsg struct{ event agent.Event }
@@ -285,7 +293,7 @@ func (m *tuiModel) answerApproval(id string, approved bool) tea.Cmd {
 
 func (m *tuiModel) send(text string) tea.Cmd {
 	return func() tea.Msg {
-		_, err := m.agent.Send(text)
+		_, err := m.agent.Send(text, nil)
 		return tuiSendMsg{err: err}
 	}
 }
@@ -518,11 +526,13 @@ func (m *tuiModel) runCommand(text string) tea.Cmd {
 		m.agent.Stop()
 		m.status = "stopping"
 		return nil
+	case "/design":
+		return m.startDesign(strings.TrimSpace(strings.TrimPrefix(text, "/design")))
 	case "/commands":
 		m.listAllCommands()
 		return nil
 	case "/help":
-		m.appendLine("/help /commands /diff /review /permissions [auto|ask] /rename <name> /recap /export <path> /clear /undo /fork <n> /forks /followup <text> /sessions [n] /new /login /model [id] /reasoning [level] /state /status /compact /snapcompact /stop /exit", true)
+		m.appendLine("/help /commands /diff /review /permissions [auto|ask] /rename <name> /recap /export <path> /clear /undo /fork <n> /forks /followup <text> /sessions [n] /new /login /model [id] /reasoning [level] /design <brief> /state /status /compact /snapcompact /stop /exit", true)
 		return nil
 	case "/forks":
 		return m.listForkPoints()
@@ -1025,11 +1035,21 @@ func (m *tuiModel) statusView() string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+// tuiDesignMsg carries one report from a design run: a phase as it lands, or
+// the result once the run is over.
+type tuiDesignMsg struct {
+	progress *design.Progress
+	result   *design.Result
+	err      error
+}
+
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.loginForm != nil {
 		return m.updateLoginForm(msg)
 	}
 	switch msg := msg.(type) {
+	case tuiDesignMsg:
+		return m.updateDesign(msg)
 	case tea.WindowSizeMsg:
 		m.width = max(20, msg.Width)
 		m.height = max(8, msg.Height)
@@ -1304,8 +1324,10 @@ func runBubbleTea(ag *agent.Agent, input io.Reader, output io.Writer, cwd, sessi
 	m.approvalMode = approval
 	m.resourceLoader = resources.NewQuiet(cwd, set)
 	m.store = store
+	m.design = design.NewService()
 	defer func() { _ = m.store.Close() }()
 	program := tea.NewProgram(m, tea.WithInput(input), tea.WithOutput(output))
+	m.post = program.Send
 	_, err := program.Run()
 	return err
 }

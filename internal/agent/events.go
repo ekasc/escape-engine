@@ -5,6 +5,14 @@ package agent
 
 import "sync"
 
+// Attachment is a file carried by a message, as the wire sees it.
+type Attachment struct {
+	Kind     string `json:"kind"`
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+	Source   string `json:"source,omitempty"`
+}
+
 // Event is one entry on the agent's event bus, serialized to the wire by the
 // rpc layer as {"type":"event","event":<name>,...}.
 type Event struct {
@@ -27,6 +35,11 @@ type Event struct {
 	Error                bool           `json:"error,omitempty"`
 	Reason               string         `json:"reason,omitempty"`
 	Message              string         `json:"message,omitempty"`
+	// Attachments are the files a user message was sent with, on the
+	// message_end for that message. The shell already has the paths it dropped,
+	// but not the bytes, and re-reading them in the shell would put file
+	// handling on both sides of the wire for no reason.
+	Attachments          []Attachment   `json:"attachments,omitempty"`
 	Summary              string         `json:"summary,omitempty"`
 	Question             string         `json:"question,omitempty"`
 	Choices              []string       `json:"choices,omitempty"`

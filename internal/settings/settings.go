@@ -62,6 +62,12 @@ type Settings struct {
 	// per-project decision needs.
 	SkillOverrides      []SkillOverride `json:"skillOverrides"`
 	DefaultProjectTrust string          `json:"defaultProjectTrust"` // "ask"|"always"|"never"
+
+	// APIEndpointBaseURL overrides the endpoint an OpenAI-compatible provider is
+	// called on. It is read on every request rather than baked in, so changing
+	// it does not require rebuilding the provider.
+	APIEndpointBaseURL string `json:"apiEndpointBaseURL"`
+	TitleModel         string `json:"titleModel"`
 }
 
 // Defaults returns a Settings with the documented defaults applied.
@@ -252,6 +258,41 @@ func SetSkillOverrides(cwd string, overrides []SkillOverride) error {
 	}
 	sort.Slice(cleaned, func(i, j int) bool { return cleaned[i].Path < cleaned[j].Path })
 	return setSkillsKey(filepath.Join(cwd, ".escape", "settings.json"), "skillOverrides", cleaned)
+}
+
+// WriteGlobal persists values into the global settings file through the same
+// read-modify-write as SetGlobalProvider, so keys this build does not know
+// about survive. Writing the decoded struct instead would drop them, and the
+// settings file is shared with other builds and by hand.
+func WriteGlobal(values map[string]any) error {
+	path := filepath.Join(GlobalDir(), "settings.json")
+	existing := make(map[string]any)
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("settings: read global settings: %w", err)
+	}
+	if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &existing); err != nil {
+			return fmt.Errorf("settings: parse global settings: %w", err)
+		}
+		if existing == nil {
+			existing = make(map[string]any)
+		}
+	}
+	for k, v := range values {
+		existing[k] = v
+	}
+	encoded, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return fmt.Errorf("settings: encode global settings: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("settings: create global settings dir: %w", err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		return fmt.Errorf("settings: write global settings: %w", err)
+	}
+	return nil
 }
 
 func setSkillsKey(path string, key string, value any) error {

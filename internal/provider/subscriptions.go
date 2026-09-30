@@ -56,6 +56,38 @@ func OpenCodeZenKey() string {
 	return openCodeAuthKey(OpenCodeZenProviderID)
 }
 
+// RemoveOpenCodeKey deletes an Escape-owned API key stored by SaveOpenCodeKey.
+// Keys from the environment or the OpenCode CLI auth store are not touched,
+// so removing one of those reports that there is nothing Escape owns to delete.
+func RemoveOpenCodeKey(providerID string) error {
+	path := escapeCredentialsPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("provider: no Escape-owned key for %s", providerID)
+		}
+		return fmt.Errorf("provider: read Escape credentials: %w", err)
+	}
+	values := make(map[string]string)
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &values); err != nil {
+			return fmt.Errorf("provider: read Escape credentials: %w", err)
+		}
+	}
+	if _, ok := values[providerID]; !ok {
+		return fmt.Errorf("provider: no Escape-owned key for %s", providerID)
+	}
+	delete(values, providerID)
+	encoded, err := json.MarshalIndent(values, "", "  ")
+	if err != nil {
+		return fmt.Errorf("provider: encode Escape credentials: %w", err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		return fmt.Errorf("provider: write Escape credentials: %w", err)
+	}
+	return nil
+}
+
 // SaveOpenCodeKey stores an Escape-owned API key without requiring the
 // OpenCode CLI. The file is private to the current user.
 func SaveOpenCodeKey(providerID, key string) error {

@@ -285,7 +285,7 @@ func (a *Agent) summarize(ctx context.Context, entries []session.Entry, previous
 	if instructions != "" {
 		b.WriteString("\n\nAdditional instructions: " + instructions)
 	}
-	out, err := a.callText(ctx, []provider.Message{
+	out, err := a.callText(ctx, "", []provider.Message{
 		{Role: "system", Text: compactionSystemPrompt},
 		{Role: "user", Text: b.String()},
 	}, 3000)

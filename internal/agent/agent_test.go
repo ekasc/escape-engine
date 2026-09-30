@@ -86,7 +86,7 @@ func TestTurnSimple(t *testing.T) {
 		}, nil
 	})
 
-	turnID, err := ag.Send("hi there")
+	turnID, err := ag.Send("hi there", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,11 +135,11 @@ func TestAutoNamingOnce(t *testing.T) {
 		}, nil
 	})
 
-	if _, err := ag.Send("please fix the bug"); err != nil {
+	if _, err := ag.Send("please fix the bug", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
-	if _, err := ag.Send("and add a test"); err != nil {
+	if _, err := ag.Send("and add a test", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
@@ -203,7 +203,7 @@ func TestRecapPersistsAndKeepsTitle(t *testing.T) {
 		}, nil
 	})
 
-	if _, err := ag.Send("please fix the bug"); err != nil {
+	if _, err := ag.Send("please fix the bug", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
@@ -255,7 +255,7 @@ func TestRecapWithoutTitle(t *testing.T) {
 		}, nil
 	})
 
-	if _, err := ag.Send("do work"); err != nil {
+	if _, err := ag.Send("do work", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
@@ -303,7 +303,7 @@ func TestTurnToolUse(t *testing.T) {
 		return nil, errors.New("unexpected call")
 	})
 
-	_, err := ag.Send("list files")
+	_, err := ag.Send("list files", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestApprovalDeniesSensitiveTool(t *testing.T) {
 
 	events := ag.Events()
 	defer ag.Unsubscribe(events)
-	if _, err := ag.Send("create a file"); err != nil {
+	if _, err := ag.Send("create a file", nil); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.After(2 * time.Second)
@@ -477,7 +477,7 @@ func TestQuestionPausesAndResumes(t *testing.T) {
 
 	events := ag.Events()
 	defer ag.Unsubscribe(events)
-	if _, err := ag.Send("deploy it"); err != nil {
+	if _, err := ag.Send("deploy it", nil); err != nil {
 		t.Fatal(err)
 	}
 	answer := make(chan struct{})
@@ -522,7 +522,7 @@ func TestStopMidTurn(t *testing.T) {
 	settled, unsub := startSettleWatcher(ag)
 	defer unsub()
 
-	if _, err := ag.Send("long task"); err != nil {
+	if _, err := ag.Send("long task", nil); err != nil {
 		t.Fatal(err)
 	}
 	ag.Stop()
@@ -556,7 +556,7 @@ func TestStopAfterPartialText(t *testing.T) {
 		}, nil
 	})
 	_ = store
-	_, err := ag.Send("x")
+	_, err := ag.Send("x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +590,7 @@ func TestProviderErrorRetry(t *testing.T) {
 		}, nil
 	}
 
-	if _, err := ag.Send("retry me"); err != nil {
+	if _, err := ag.Send("retry me", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
@@ -606,7 +606,7 @@ func TestProviderFatalError(t *testing.T) {
 	ag, _, _ := newTestAgent(t, func(ctx context.Context, req provider.Request) ([]provider.Event, error) {
 		return nil, errors.New("auth failed")
 	})
-	_, err := ag.Send("x")
+	_, err := ag.Send("x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +630,7 @@ func TestEmptyToolResult(t *testing.T) {
 			{Kind: provider.EventDone, StopReason: "stop"},
 		}, nil
 	})
-	if _, err := ag.Send("read missing"); err != nil {
+	if _, err := ag.Send("read missing", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
@@ -650,7 +650,7 @@ func TestUnknownTool(t *testing.T) {
 			{Kind: provider.EventDone, StopReason: "stop"},
 		}, nil
 	})
-	_, err := ag.Send("use teleport")
+	_, err := ag.Send("use teleport", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,11 +664,11 @@ func TestSendBusy(t *testing.T) {
 		<-blocker
 		return []provider.Event{{Kind: provider.EventDone, StopReason: "stop"}}, nil
 	})
-	if _, err := ag.Send("one"); err != nil {
+	if _, err := ag.Send("one", nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if _, err := ag.Send("two"); !errors.Is(err, ErrBusy) {
+	if _, err := ag.Send("two", nil); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second send err = %v, want ErrBusy", err)
 	}
 	close(blocker)
@@ -699,7 +699,7 @@ func TestSteer(t *testing.T) {
 		}, nil
 	})
 
-	_, err := ag.Send("first")
+	_, err := ag.Send("first", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,7 +736,7 @@ func TestMaxIterations(t *testing.T) {
 		}, nil
 	})
 	ag.opts.MaxIterations = 3
-	_, err := ag.Send("loop")
+	_, err := ag.Send("loop", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,7 +766,7 @@ func TestEventStreamOrder(t *testing.T) {
 		}
 	}()
 
-	if _, err := ag.Send("x"); err != nil {
+	if _, err := ag.Send("x", nil); err != nil {
 		t.Fatal(err)
 	}
 	<-done
@@ -802,11 +802,11 @@ func TestTurnKeepsHistory(t *testing.T) {
 		return []provider.Event{{Kind: provider.EventDone, StopReason: "stop"}}, nil
 	})
 
-	if _, err := ag.Send("first turn"); err != nil {
+	if _, err := ag.Send("first turn", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)
-	if _, err := ag.Send("second turn"); err != nil {
+	if _, err := ag.Send("second turn", nil); err != nil {
 		t.Fatal(err)
 	}
 	waitSettle(t, ag, ReasonDone)

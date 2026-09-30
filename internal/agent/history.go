@@ -1,11 +1,23 @@
 package agent
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/ekasc/escape-engine/internal/provider"
 	"github.com/ekasc/escape-engine/internal/session"
+	"github.com/ekasc/escape-engine/internal/tools"
 )
+
+// imageNote is the text a message carries when its image was attached, and the
+// prefix of the text it carries when the image could not be. Both come from the
+// read tool's marker so the two cannot drift apart.
+const imageNote = "Read image"
+
+// imageSurrogate is appended when the model does not accept image input. The
+// model is told the image is missing rather than sent base64 it cannot read, so
+// it can report the gap instead of describing a picture it never saw.
+const imageSurrogate = " (not shown: this model does not accept image input)"
 
 // entryCache remembers how much of a session file has already been turned into
 // entries. A session file is append-only, so re-reading it in full on every turn
@@ -49,7 +61,11 @@ func (c *entryCache) sinceAppends(path string) ([]session.Entry, error) {
 	}
 }
 
-func messagesFromEntries(entries []session.Entry, systemPrompt string) ([]provider.Message, error) {
+// messagesFromEntries builds the provider transcript. model decides whether an
+// image is attached or replaced by a text surrogate; it is the only reason this
+// function needs to know which model is about to be called.
+func messagesFromEntries(entries []session.Entry, systemPrompt, model string) ([]provider.Message, error) {
+	seesImages := session.LookupModel(model).AcceptsImage()
 	firstKeptIdx := 0
 	var summary string
 	var snapImages []*provider.Image
@@ -77,8 +93,11 @@ func messagesFromEntries(entries []session.Entry, systemPrompt string) ([]provid
 
 	msgs := []provider.Message{{Role: "system", Text: systemPrompt}}
 	if len(snapImages) > 0 {
-		text := "[Snapcompact archive]\n" + snapFallback
-		msgs = append(msgs, provider.Message{Role: "user", Text: text, Images: snapImages})
+		if seesImages {
+			msgs = append(msgs, provider.Message{Role: "user", Text: "[Snapcompact archive]\n" + snapFallback, Images: snapImages})
+		} else {
+			msgs = append(msgs, provider.Message{Role: "user", Text: "[Snapcompact archive]" + imageSurrogate + "\n" + snapFallback})
+		}
 	}
 	for i := firstKeptIdx; i < len(entries); i++ {
 		e := entries[i]
@@ -98,15 +117,41 @@ func messagesFromEntries(entries []session.Entry, systemPrompt string) ([]provid
 			}
 			msgs = append(msgs, pm)
 		case session.RoleToolResult:
-			msgs = append(msgs, provider.Message{
+			pm := provider.Message{
 				Role:         "tool",
 				ToolCallID:   m.ToolCallID,
 				ToolCallName: m.ToolName,
 				Text:         m.Text(false),
-			})
+			}
+			if img, note, ok := readImage(pm.Text); ok {
+				pm.Text = note
+				if seesImages {
+					pm.Image = img
+				} else {
+					pm.Text += imageSurrogate
+				}
+			}
+			msgs = append(msgs, pm)
 		}
 	}
 	return msgs, nil
+}
+
+// readImage recognises a tool result the read tool marked as an image and
+// returns the decoded image with the text that should accompany it. A result
+// that carries the marker but does not decode is not an image: the base64 was
+// truncated or corrupted somewhere upstream, and reporting that as text is
+// better than dropping the result.
+func readImage(text string) (*provider.Image, string, bool) {
+	uri, ok := strings.CutPrefix(text, tools.ImageOutputPrefix)
+	if !ok {
+		return nil, "", false
+	}
+	img, err := provider.ParseDataURI(uri)
+	if err != nil {
+		return nil, text, false
+	}
+	return img, imageNote, true
 }
 
 // prime reads a session into the cache without needing the result.

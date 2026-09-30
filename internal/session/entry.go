@@ -121,7 +121,13 @@ const (
 	BlockText     = "text"
 	BlockThinking = "thinking"
 	BlockToolCall = "toolCall"
-	BlockImage    = "image"
+	// BlockImage is an image attachment. BlockMedia is the same shape for
+	// everything else a user can drop on the composer. Both exist so that files
+	// written before non-image attachments do not have to be rewritten: a
+	// session file that says "image" keeps saying it, and readers treat the two
+	// as the same thing. They are not aliases on disk — the value is the value.
+	BlockImage = "image"
+	BlockMedia = "media"
 )
 
 // Usage mirrors pi's token accounting (costs omitted in v1).

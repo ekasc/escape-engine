@@ -158,10 +158,7 @@ func wireMessages(msgs []Message) []map[string]any {
 // [{"type":"text","text":...}, {"type":"image_url","image_url":{"url":"data:<mime>;base64,..."}}]
 // (OpenAI multimodal format).
 func wireContent(m Message) any {
-	images := m.Images
-	if m.Image != nil {
-		images = append([]*Image{m.Image}, images...)
-	}
+	images := wireImages(m)
 	if len(images) == 0 {
 		return m.Text
 	}

@@ -433,7 +433,7 @@ func cmdAsk(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}()
 
-	if _, err := ag.Send(prompt); err != nil {
+	if _, err := ag.Send(prompt, nil); err != nil {
 		fmt.Fprintln(stderr, "escape ask:", err)
 		return 1
 	}
@@ -863,7 +863,7 @@ func runTurnInteractive(ag *agent.Agent, text string, stdout io.Writer) {
 		}
 	}()
 
-	if _, err := ag.Send(text); err != nil {
+	if _, err := ag.Send(text, nil); err != nil {
 		fmt.Fprintf(stdout, "[error] %v\n", err)
 		return
 	}
@@ -1125,7 +1125,7 @@ func cmdDiagnostics(args []string, stdout, stderr io.Writer) int {
 		}
 	}()
 
-	if _, err := ag.Send(prompt); err != nil {
+	if _, err := ag.Send(prompt, nil); err != nil {
 		fmt.Fprintln(stderr, "escape diagnostics:", err)
 		return 1
 	}

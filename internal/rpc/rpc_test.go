@@ -272,10 +272,15 @@ func TestRPCBusyRejectsSecondSend(t *testing.T) {
 func TestRPCListSessions(t *testing.T) {
 	root := t.TempDir()
 	// session.List expects root/<slug>/<file>.jsonl, so nest the files.
+	// Each session gets an entry, because opening a store no longer creates its
+	// file: a session exists once something has been sent to it.
 	for _, name := range []string{"a", "b"} {
 		path := filepath.Join(root, session.SlugForDir("/proj"), name+".jsonl")
 		s, err := session.Open(path, "/proj")
 		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Append(session.Entry{Type: session.TypeMessage, Message: &session.Message{Role: session.RoleUser, Content: []session.Block{{Type: "text", Text: "hi"}}}}); err != nil {
 			t.Fatal(err)
 		}
 		s.Close()

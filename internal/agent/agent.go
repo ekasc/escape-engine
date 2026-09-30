@@ -293,7 +293,7 @@ func (a *Agent) Rename(name string) error {
 	if store == nil {
 		return errors.New("cannot rename without an active session store")
 	}
-	if err := session.SetName(store.Path(), name); err != nil {
+	if err := session.SetName(store, name); err != nil {
 		return err
 	}
 	a.mu.Lock()

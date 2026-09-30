@@ -12,10 +12,15 @@ func TestPruneOnlyFindsGenuinelyEmptyDirectories(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "empty"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// has a session
+	// has a session. One entry, because a store no longer creates its file on
+	// open — that is the whole point of the change, and a directory holding only
+	// an unopened store is genuinely empty and should be pruned.
 	dir := filepath.Join(root, "withsession")
 	store, err := Open(filepath.Join(dir, "s.jsonl"), "/repo")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(Entry{Type: TypeMessage, Message: &Message{Role: "user", Content: []Block{{Type: "text", Text: "hi"}}}}); err != nil {
 		t.Fatal(err)
 	}
 	_ = store.Close()

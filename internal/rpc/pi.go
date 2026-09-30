@@ -961,7 +961,7 @@ func (s *PiServer) dispatch(ctx context.Context, cmd string, req piRequest) {
 		text, err := session.LastAssistantText(s.store.Path())
 		s.finish(req, cmd, map[string]any{"text": text}, err)
 	case "set_session_name":
-		err := session.SetName(s.store.Path(), req.Name)
+		err := session.SetName(s.store, req.Name)
 		s.finish(req, cmd, map[string]any{}, err)
 	case "get_commands":
 		s.finish(req, cmd, map[string]any{"commands": s.loader.GetCommands()}, nil)

@@ -113,8 +113,12 @@ func TestLeafID(t *testing.T) {
 		t.Errorf("leaf = %s, want c2", leaf)
 	}
 
-	// Only a header: no entries -> empty leaf.
+	// Only a header: no entries -> empty leaf. The header is written by hand
+	// because a store no longer creates one on open; see store.go's Open.
 	s := newTestStore(t)
+	if _, err := s.Append(Entry{Type: TypeSession, ID: NewSessionID(), Version: 3, Cwd: "/tmp/proj"}); err != nil {
+		t.Fatal(err)
+	}
 	leaf, err = LeafID(s.Path())
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +329,7 @@ func TestLastAssistantText(t *testing.T) {
 func TestSetName(t *testing.T) {
 	s := newTestStore(t)
 	path := s.Path()
-	if err := SetName(path, "Refactor auth"); err != nil {
+	if err := SetName(s, "Refactor auth"); err != nil {
 		t.Fatal(err)
 	}
 	name, err := Name(path)

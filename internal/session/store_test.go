@@ -19,20 +19,70 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
-func TestOpenWritesHeader(t *testing.T) {
-	s := newTestStore(t)
-	if s.ID() == "" {
-		t.Fatal("expected session id from header")
+// Opening a store must not bring a session into being. The server opens one at
+// boot and again on every project switch, so an eager Open left an empty
+// "Untitled session" behind on every launch and every switch — a session that
+// existed because it had been looked at, not because anything was said in it.
+func TestOpenCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.jsonl")
+	s, err := Open(path, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("open: %v", err)
 	}
-	entries, err := ReadAll(s.Path())
+	defer s.Close()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Open created %s; a session should not exist until something is written", path)
+	}
+	// An id is reserved up front, because the provider is bound to it on the
+	// first turn and the turn is what writes the file. That is not a session:
+	// the path is not on disk and nothing lists it.
+	if s.ID() == "" {
+		t.Fatal("a session id should be reserved on open, so the provider is bound to a real one")
+	}
+	// Closing a store that was never written to is not an error: there is no
+	// file, and inventing one here to close would defeat the point.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("Close created the file")
+	}
+}
+
+func TestFirstAppendWritesHeaderThenEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.jsonl")
+	s, err := Open(path, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.Append(Entry{Type: TypeMessage, Message: &Message{Role: "user", Content: []Block{{Type: "text", Text: "hello"}}}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if s.ID() == "" {
+		t.Fatal("expected a session id once something has been written")
+	}
+	entries, err := ReadAll(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Type != TypeSession {
-		t.Fatalf("expected header entry, got %+v", entries)
+	if len(entries) != 2 {
+		t.Fatalf("expected header then entry, got %+v", entries)
+	}
+	if entries[0].Type != TypeSession {
+		t.Fatalf("first entry should be the header, got %+v", entries[0])
 	}
 	if entries[0].Version != 3 || entries[0].Cwd != "/tmp/proj" {
 		t.Fatalf("bad header: %+v", entries[0])
+	}
+	if entries[1].Type != TypeMessage {
+		t.Fatalf("second entry should be the message, got %+v", entries[1])
+	}
+	// The message must hang off the header, or a reader walking parents breaks.
+	if entries[1].ParentID != entries[0].ID {
+		t.Errorf("parent = %q, want the header id %q", entries[1].ParentID, entries[0].ID)
 	}
 }
 
@@ -167,6 +217,9 @@ func TestAppendChainParentIDs(t *testing.T) {
 
 func TestReopenRecoversID(t *testing.T) {
 	s := newTestStore(t)
+	if _, err := s.Append(Entry{Type: TypeMessage, Message: &Message{Role: "user", Content: []Block{{Type: "text", Text: "hi"}}}}); err != nil {
+		t.Fatal(err)
+	}
 	id := s.ID()
 	s.Close()
 	s2, err := Open(s.Path(), "/tmp/proj")
@@ -273,6 +326,9 @@ func TestList(t *testing.T) {
 		}
 		s, err := Open(path, "/tmp/proj")
 		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Append(Entry{Type: TypeMessage, Message: &Message{Role: "user", Content: []Block{{Type: "text", Text: "hi"}}}}); err != nil {
 			t.Fatal(err)
 		}
 		s.Close()

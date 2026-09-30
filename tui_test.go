@@ -275,9 +275,16 @@ func TestTUIQueuesWhileBusy(t *testing.T) {
 func TestTUIListSessions(t *testing.T) {
 	root := t.TempDir()
 	cwd := t.TempDir()
+	// A session has to have something in it to exist; opening a store creates
+	// nothing on disk.
 	path := filepath.Join(root, "project", "session.jsonl")
 	store, err := session.Open(path, cwd)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A non-message entry, so the session exists without picking up a title from
+	// a user message — "(untitled)" is the label under test.
+	if _, err := store.Append(session.Entry{Type: session.TypeModelChange, Model: "m"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -373,19 +380,11 @@ func TestUndoSessionPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	freshStore, err := session.Open(freshPath, cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer freshStore.Close()
-	freshEntries, err := session.ReadAll(freshPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range freshEntries {
-		if entry.Message != nil {
-			t.Fatal("undoing the first turn retained a message")
-		}
+	// Undoing the only turn leaves nothing: with no parent to fork from, this is
+	// just a path, and a path with nothing written to it is not a session. It
+	// used to be an empty file on disk, which the shell then listed.
+	if _, err := os.Stat(freshPath); !os.IsNotExist(err) {
+		t.Fatalf("undoing the first turn created %s; it should create nothing", freshPath)
 	}
 }
 

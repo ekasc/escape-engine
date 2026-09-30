@@ -256,13 +256,19 @@ func LastAssistantText(path string) (string, error) {
 }
 
 // SetName appends a session_info entry with the given display name.
-func SetName(path, name string) error {
-	s, err := Open(path, "")
-	if err != nil {
-		return err
+//
+// It takes the store rather than a path because a store knows its own cwd, and
+// writing the name must never be what brings a session into existence or
+// decides which project it belongs to. This used to reopen the file by path
+// with an empty cwd, which was harmless while opening a store always created
+// the file with a header; once opening stopped creating anything, naming a
+// session that had not been sent to yet wrote a header with no cwd, and every
+// project-scoped listing then filtered that session out permanently.
+func SetName(s *Store, name string) error {
+	if s == nil {
+		return errors.New("cannot name a session without a store")
 	}
-	defer s.Close()
-	_, err = s.Append(Entry{Type: TypeSessionInfo, Name: name})
+	_, err := s.Append(Entry{Type: TypeSessionInfo, Name: name})
 	return err
 }
 

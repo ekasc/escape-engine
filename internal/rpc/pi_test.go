@@ -31,8 +31,11 @@ func fakePiHandler(ctx context.Context, req provider.Request) ([]provider.Event,
 // in-flight turn: prompt responses and agent_settled events are always
 // delivered before the test closes the input.
 type piTestServer struct {
-	t           *testing.T
-	srv         *PiServer
+	t   *testing.T
+	srv *PiServer
+	// cwd is the project the server booted in, so a test can switch away and
+	// back without hard-coding a path.
+	cwd         string
 	sessionPath string
 	inW         *io.PipeWriter
 	outR        *bufio.Reader
@@ -82,7 +85,7 @@ func newPiTestServer(t *testing.T, handler func(ctx context.Context, req provide
 	}()
 
 	ts := &piTestServer{
-		t: t, srv: srv, sessionPath: sessionPath,
+		t: t, srv: srv, cwd: dir, sessionPath: sessionPath,
 		inW: inW, outR: bufio.NewReader(outR), done: done, cancel: cancel,
 	}
 	t.Cleanup(func() {
@@ -188,6 +191,8 @@ func TestPiPrompt(t *testing.T) {
 	}
 }
 
+
+
 func TestPiGetState(t *testing.T) {
 	ts := newPiTestServer(t, nil)
 
@@ -259,9 +264,12 @@ func TestPiSessionLifecycle(t *testing.T) {
 	if list["success"] != true {
 		t.Fatalf("list_sessions = %v", list)
 	}
-	initial, ok := list["data"].(map[string]any)["sessions"].([]any)
-	if !ok || len(initial) != 1 {
-		t.Fatalf("initial sessions = %v", list["data"])
+	// A server that has just started has nothing to show. It used to report one
+	// session here, because opening a store created its file: the shell listed
+	// that as an "Untitled session" that nobody had ever sent anything to.
+	initial, _ := list["data"].(map[string]any)["sessions"].([]any)
+	if len(initial) != 0 {
+		t.Fatalf("a fresh server should have no sessions, got %v", list["data"])
 	}
 
 	ts.send(map[string]any{"type": "new_session"})
@@ -289,6 +297,45 @@ func TestPiSessionLifecycle(t *testing.T) {
 		t.Fatalf("active session = %v, want %s", stateData["sessionFile"], newPath)
 	}
 	ts.runPrompt("after switch")
+
+	// Sending is what makes a session exist. Before this, the file was created
+	// by being opened, so the list filled with sessions that had no messages.
+	ts.send(map[string]any{"type": "list_sessions"})
+	after := ts.mustResponse("list_sessions")
+	entries, _ := after["data"].(map[string]any)["sessions"].([]any)
+	if len(entries) == 0 {
+		t.Fatal("a session with a prompt in it should be listed")
+	}
+}
+
+// Switching project rebinds the agent to a new directory, and it used to mint a
+// new session file every time. Navigating between projects therefore filled the
+// session list with empty sessions, one per switch.
+func TestPiSwitchProjectDoesNotCreateSessions(t *testing.T) {
+	ts := newPiTestServer(t, nil)
+
+	other := t.TempDir()
+	ts.send(map[string]any{"type": "add_project", "sessionPath": other})
+	if resp := ts.mustResponse("add_project"); resp["success"] != true {
+		t.Fatalf("add_project = %v", resp)
+	}
+	for i := 0; i < 3; i++ {
+		ts.send(map[string]any{"type": "switch_project", "sessionPath": other})
+		if resp := ts.mustResponse("switch_project"); resp["success"] != true {
+			t.Fatalf("switch_project = %v", resp)
+		}
+		ts.send(map[string]any{"type": "switch_project", "sessionPath": ts.cwd})
+		if resp := ts.mustResponse("switch_project"); resp["success"] != true {
+			t.Fatalf("switch_project back = %v", resp)
+		}
+	}
+
+	ts.send(map[string]any{"type": "list_sessions"})
+	list := ts.mustResponse("list_sessions")
+	entries, _ := list["data"].(map[string]any)["sessions"].([]any)
+	if len(entries) != 0 {
+		t.Fatalf("switching project created %d sessions; it should create none: %v", len(entries), list["data"])
+	}
 }
 
 func TestPiGetModels(t *testing.T) {

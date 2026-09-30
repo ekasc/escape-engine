@@ -13,19 +13,35 @@ import (
 	"github.com/ekasc/escape-engine/internal/session"
 )
 
+// writeSession creates a session on disk with one entry in it.
+//
+// Opening a store deliberately creates nothing: a session exists once something
+// has been sent to it. Tests that need a session to exist have to give it
+// content, which is what this does.
+func writeSession(t *testing.T, path, cwd string) {
+	t.Helper()
+	store, err := session.Open(path, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(session.Entry{
+		Type:    session.TypeMessage,
+		Message: &session.Message{Role: session.RoleUser, Content: []session.Block{{Type: "text", Text: "hi"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLatestSessionForCwd(t *testing.T) {
 	root := t.TempDir()
 	cwd := t.TempDir()
 	oldPath := filepath.Join(root, "project", "old.jsonl")
 	newPath := filepath.Join(root, "project", "new.jsonl")
 	for _, path := range []string{oldPath, newPath} {
-		store, err := session.Open(path, cwd)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Close(); err != nil {
-			t.Fatal(err)
-		}
+		writeSession(t, path, cwd)
 	}
 	oldTime := time.Now().Add(-time.Hour)
 	newTime := time.Now()
@@ -162,13 +178,7 @@ func TestReplResumeFlag(t *testing.T) {
 	root := t.TempDir()
 	cwd := t.TempDir()
 	path := filepath.Join(root, "project", "resume.jsonl")
-	store, err := session.Open(path, cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
+	writeSession(t, path, cwd)
 	t.Setenv("ESCAPE_SESSIONS_DIR", root)
 
 	var stdout, stderr strings.Builder
@@ -214,7 +224,11 @@ func TestAskUsesSettingsModelDefault(t *testing.T) {
 	}
 }
 
-func TestRPCCreatesSessionWhenPathOmitted(t *testing.T) {
+// Starting the RPC server with no session path must not leave a session behind.
+// It used to: the server opened a store, opening created the file, and the
+// shell listed the result as an "Untitled session" that nothing had been sent
+// to. Starting up is not a session.
+func TestRPCBootCreatesNoSessionWhenPathOmitted(t *testing.T) {
 	root := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("ESCAPE_SESSIONS_DIR", root)
@@ -227,10 +241,19 @@ func TestRPCCreatesSessionWhenPathOmitted(t *testing.T) {
 		t.Fatalf("rpc stdout = %q", stdout.String())
 	}
 	infos, err := session.List(root)
-	if err != nil || len(infos) != 1 {
-		t.Fatalf("created sessions = %+v, err=%v", infos, err)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("booting created %d sessions: %+v", len(infos), infos)
 	}
 }
+
+// That a prompt is what creates one is covered at the server level by
+// TestPiSessionLifecycle, which can wait for the turn to settle. It is not
+// asserted here because the `rpc` subcommand returns as soon as stdin reaches
+// EOF, which can cut the turn off before anything is written — a test that
+// depends on winning that race is worse than no test.
 
 func TestAskRejectsApprovalSettings(t *testing.T) {
 	home := t.TempDir()
@@ -369,13 +392,7 @@ func TestResolveLiveSessionPathPrefersLatest(t *testing.T) {
 	older := filepath.Join(root, session.SlugForDir(cwd), "2026-01-01T00-00-00-000Z_old.jsonl")
 	newer := filepath.Join(root, session.SlugForDir(cwd), "2026-06-01T00-00-00-000Z_new.jsonl")
 	for _, p := range []string{older, newer} {
-		store, err := session.Open(p, cwd)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Close(); err != nil {
-			t.Fatal(err)
-		}
+		writeSession(t, p, cwd)
 	}
 	// List sorts on mtime, so make the intended winner the newer file.
 	future := time.Now().Add(time.Hour)

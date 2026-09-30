@@ -235,10 +235,16 @@ func TestPagingAnEmptyOrMissingSession(t *testing.T) {
 	if _, err := PageBefore(filepath.Join(dir, "nope.jsonl"), "", 10); err == nil {
 		t.Fatal("a missing session should report an error")
 	}
-	// Header-only session: no content entries yet.
+	// Header-only session: no content entries yet. Written by hand because a
+	// store no longer produces this state on its own — the header and the first
+	// entry are written together — but files this shape still exist on disk
+	// from before that change, so the reader has to keep tolerating them.
 	path := filepath.Join(dir, "empty.jsonl")
 	store, err := Open(path, dir)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(Entry{Type: TypeSession, ID: NewSessionID(), Version: 3, Cwd: dir}); err != nil {
 		t.Fatal(err)
 	}
 	_ = store.Close()
